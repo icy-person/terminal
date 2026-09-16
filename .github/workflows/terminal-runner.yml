@@ -149,8 +149,12 @@ jobs:
           TOKEN_QS="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$TERMINAL_TOKEN")"
           WS_URL="${URL/https:\/\//wss://}/ws"
           ENDPOINT_URL="https://icy-person.github.io/terminal/?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$WS_URL")&token=$TOKEN_QS"
-          NOVNC_PATH="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "websockify?token=$TERMINAL_TOKEN")"
-          NOVNC_URL="$URL/novnc/vnc.html?path=$NOVNC_PATH"
+
+          # noVNC is served by the relay under /novnc, while the relay's
+          # WebSocket endpoint is /novnc/websockify. Use an absolute path so
+          # noVNC does not resolve it against vnc.html and drop the /novnc prefix.
+          NOVNC_PATH="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "/novnc/websockify?token=$TERMINAL_TOKEN")"
+          NOVNC_URL="$URL/novnc/vnc.html?path=$NOVNC_PATH&autoconnect=1"
 
           echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
           echo "TERMINAL_WS_URL=$WS_URL" >> "$GITHUB_ENV"
