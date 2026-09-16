@@ -14,15 +14,12 @@ on:
       idle_seconds:
         description: "Health-check interval"
         required: true
-        default: "3"
+        default: "5"
         type: string
 
 permissions:
   contents: read
 
-# GitHub-hosted runners are ephemeral. This workflow keeps one job alive
-# for the duration of the workflow and exposes the PTY only through an
-# outbound Cloudflare Quick Tunnel connection.
 concurrency:
   group: hosted-terminal
   cancel-in-progress: true
@@ -36,6 +33,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Node dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund --ignore-scripts
+          node --version
+          npm --version
 
       - name: Show runner information
         shell: bash
@@ -51,11 +56,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           TTYD_VERSION="1.7.7"
-          curl -fsSL \
-            "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
-            -o "$RUNNER_TEMP/ttyd"
+          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" -o "$RUNNER_TEMP/ttyd"
           chmod +x "$RUNNER_TEMP/ttyd"
           "$RUNNER_TEMP/ttyd" --version
 
@@ -63,15 +65,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           CLOUDFLARED_VERSION="2026.9.1"
-          curl -fsSL \
-            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
-            -o "$RUNNER_TEMP/cloudflared"
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" -o "$RUNNER_TEMP/cloudflared"
           chmod +x "$RUNNER_TEMP/cloudflared"
           "$RUNNER_TEMP/cloudflared" --version
 
-      - name: Start hosted PTY terminal
+      - name: Start hosted PTY and authenticated relay
         id: start-terminal
         shell: bash
         env:
@@ -81,43 +80,53 @@ jobs:
 
           TOKEN="$(python3 - <<'PY'
           import secrets
-          print(secrets.token_urlsafe(24))
+          print(secrets.token_hex(32))
           PY
           )"
-
           printf '%s' "$TOKEN" > "$RUNNER_TEMP/terminal-token"
           chmod 600 "$RUNNER_TEMP/terminal-token"
+          echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
           if [ "$TERMINAL_SHELL" = "sh" ]; then
             SHELL_CMD="/bin/sh"
-            SHELL_ARGS=""
           else
             SHELL_CMD="/bin/bash"
-            SHELL_ARGS="--login"
           fi
 
           nohup "$RUNNER_TEMP/ttyd" \
             -W \
             -p 7681 \
             -i 127.0.0.1 \
-            -P 5 \
-            -c "terminal:${TOKEN}" \
-            "$SHELL_CMD" $SHELL_ARGS \
+            -P 8 \
+            "$SHELL_CMD" --login \
             > "$RUNNER_TEMP/ttyd.log" 2>&1 &
-
           echo $! > "$RUNNER_TEMP/ttyd.pid"
-          sleep 2
+
+          nohup npm run relay \
+            > "$RUNNER_TEMP/relay.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/relay.pid"
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
 
           if ! kill -0 "$(cat "$RUNNER_TEMP/ttyd.pid")" 2>/dev/null; then
             echo "ttyd failed to start"
             cat "$RUNNER_TEMP/ttyd.log"
             exit 1
           fi
+          if ! kill -0 "$(cat "$RUNNER_TEMP/relay.pid")" 2>/dev/null; then
+            echo "relay failed to start"
+            cat "$RUNNER_TEMP/relay.log"
+            exit 1
+          fi
 
-          echo "PTY terminal started on 127.0.0.1:7681"
-          echo "Authentication: basic auth enabled"
+          echo "PTY: 127.0.0.1:7681"
+          echo "Relay: 127.0.0.1:8090"
+          echo "Authentication: 256-bit random relay token"
 
-      - name: Start public tunnel
+      - name: Start public WebSocket tunnel
         id: tunnel
         shell: bash
         run: |
@@ -125,17 +134,14 @@ jobs:
 
           nohup "$RUNNER_TEMP/cloudflared" tunnel \
             --no-autoupdate \
-            --url http://127.0.0.1:7681 \
+            --url http://127.0.0.1:8090 \
             > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
-
           echo $! > "$RUNNER_TEMP/cloudflared.pid"
 
           URL=""
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 45); do
             URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"
-            if [ -n "$URL" ]; then
-              break
-            fi
+            [ -n "$URL" ] && break
             sleep 2
           done
 
@@ -145,60 +151,77 @@ jobs:
             exit 1
           fi
 
-          echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
-          echo "Terminal URL: $URL"
-          echo "Terminal username: terminal"
-          echo "Terminal password is generated for this run and is intentionally not printed."
-          echo "Open the URL and provide the generated credentials to the terminal client."
+          WS_URL="${URL/https:\/\//wss://}/ws"
+          ENDPOINT_URL="https://icy-person.github.io/terminal/?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$WS_URL")&token=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$TERMINAL_TOKEN")"
 
-      - name: Write connection metadata
+          echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
+          echo "TERMINAL_WS_URL=$WS_URL" >> "$GITHUB_ENV"
+          echo "TERMINAL_PAGES_URL=$ENDPOINT_URL" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "============================================================"
+          echo "HOSTED TERMINAL READY"
+          echo "WebSocket endpoint: $WS_URL"
+          echo "Pages connect URL:  $ENDPOINT_URL"
+          echo "Token is embedded only in the generated connect URL."
+          echo "The token is not printed separately."
+          echo "============================================================"
+          echo ""
+
+      - name: Write connection summary
         shell: bash
         run: |
           set -euo pipefail
-
           {
-            echo "GitHub hosted terminal"
-            echo "Runner: ${RUNNER_NAME}"
-            echo "URL: ${TERMINAL_URL:-unknown}"
-            echo "Username: terminal"
-            echo "Password: generated per run; stored only on the runner"
-            echo "Expires: when the workflow/job ends"
-          } > "$RUNNER_TEMP/terminal-connection.txt"
-
-          echo ""
-          cat "$RUNNER_TEMP/terminal-connection.txt"
-          echo ""
-          echo "For security, the password is not emitted to Actions logs."
+            echo "## GitHub Hosted Terminal"
+            echo
+            echo "**Runner:** ${RUNNER_NAME}"
+            echo "**Tunnel:** ${TERMINAL_URL}"
+            echo
+            echo "### Connect"
+            echo "[Open terminal UI](${TERMINAL_PAGES_URL})"
+            echo
+            echo "The browser connects with xterm.js over WebSocket to the authenticated relay, which forwards the ttyd protocol to the local PTY."
+            echo
+            echo "The endpoint/token expire when this workflow job ends."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep runner alive and monitor services
         shell: bash
         env:
-          IDLE_SECONDS: ${{ inputs.idle_seconds || '3' }}
+          IDLE_SECONDS: ${{ inputs.idle_seconds || '5' }}
         run: |
           set -euo pipefail
-
-          echo "Hosted terminal is ready."
-          echo "The job will remain alive until cancelled or timeout (350 minutes)."
+          echo "Hosted terminal is ready. Job remains alive until cancelled or timeout."
 
           while true; do
             TTYD_PID="$(cat "$RUNNER_TEMP/ttyd.pid")"
+            RELAY_PID="$(cat "$RUNNER_TEMP/relay.pid")"
             TUNNEL_PID="$(cat "$RUNNER_TEMP/cloudflared.pid")"
 
             if ! kill -0 "$TTYD_PID" 2>/dev/null; then
-              echo "[$(date -Is)] ERROR: ttyd stopped"
+              echo "ERROR: ttyd stopped"
               tail -n 50 "$RUNNER_TEMP/ttyd.log" || true
               exit 1
             fi
-
+            if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+              echo "ERROR: relay stopped"
+              tail -n 50 "$RUNNER_TEMP/relay.log" || true
+              exit 1
+            fi
             if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-              echo "[$(date -Is)] ERROR: cloudflared stopped"
+              echo "ERROR: cloudflared stopped"
               tail -n 50 "$RUNNER_TEMP/cloudflared.log" || true
               exit 1
             fi
 
-            printf '[%s] runner=%s ttyd=alive tunnel=alive url=%s\n' \
-              "$(date -Is)" "$RUNNER_NAME" "${TERMINAL_URL:-unknown}"
-            sleep "${IDLE_SECONDS:-3}"
+            if ! curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+              echo "ERROR: relay health check failed"
+              exit 1
+            fi
+
+            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive url=%s\n' "$(date -Is)" "$RUNNER_NAME" "${TERMINAL_URL:-unknown}"
+            sleep "${IDLE_SECONDS:-5}"
           done
 
       - name: Cleanup hosted terminal
@@ -206,14 +229,10 @@ jobs:
         shell: bash
         run: |
           set +e
-
-          if [ -f "$RUNNER_TEMP/ttyd.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/ttyd.pid")" 2>/dev/null || true
-          fi
-
-          if [ -f "$RUNNER_TEMP/cloudflared.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/cloudflared.pid")" 2>/dev/null || true
-          fi
-
+          for file in ttyd.pid relay.pid cloudflared.pid; do
+            if [ -f "$RUNNER_TEMP/$file" ]; then
+              kill "$(cat "$RUNNER_TEMP/$file")" 2>/dev/null || true
+            fi
+          done
           rm -f "$RUNNER_TEMP/terminal-token"
           echo "Hosted terminal cleaned up."
