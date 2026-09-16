@@ -1,4 +1,4 @@
-name: GitHub Hosted Terminal Runner (Arch)
+name: GitHub Hosted Terminal Runner (Arch + RDP)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   terminal:
-    name: Hosted terminal + noVNC desktop (Arch)
+    name: Hosted terminal + RDP desktop (Arch)
     runs-on: ubuntu-26.04
     timeout-minutes: 350
 
@@ -43,7 +43,7 @@ jobs:
           pacman -S --needed --noconfirm nodejs npm python python-pip curl ca-certificates
           npm install --no-audit --no-fund --ignore-scripts
 
-      - name: Install terminal and desktop stack
+      - name: Install terminal and RDP desktop stack
         shell: bash
         run: |
           set -euo pipefail
@@ -52,45 +52,56 @@ jobs:
             xfce4 \
             xfce4-terminal \
             dbus \
-            xorg-server-xvfb \
-            x11vnc \
-            xorg-xdpyinfo \
-            curl
+            xorg \
+            xrdp \
+            xorgxrdp \
+            curl \
+            tar
 
-          NOVNC_VERSION="1.7.0"
-          WEBSOCKIFY_VERSION="0.13.0"
-          NOVNC_DIR="$RUNNER_TEMP/noVNC"
-          WEBSOCKIFY_DIR="$RUNNER_TEMP/websockify"
+          XRDP_USER="rdpuser"
+          XRDP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
+          useradd -m -s /bin/bash "$XRDP_USER"
+          printf '%s:%s\n' "$XRDP_USER" "$XRDP_PASSWORD" | chpasswd
 
-          rm -rf "$NOVNC_DIR" "$WEBSOCKIFY_DIR"
-          mkdir -p "$NOVNC_DIR" "$WEBSOCKIFY_DIR"
+          install -d -m 700 -o "$XRDP_USER" -g "$XRDP_USER" "/home/$XRDP_USER"
+          cat > "/home/$XRDP_USER/.xinitrc" <<'EOF'
+#!/bin/sh
+exec startxfce4
+EOF
+          chmod 700 "/home/$XRDP_USER/.xinitrc"
+          chown "$XRDP_USER:$XRDP_USER" "/home/$XRDP_USER/.xinitrc"
 
-          curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
-            | tar -xz --strip-components=1 -C "$NOVNC_DIR"
+          # xorgxrdp launches a dedicated Xorg session for each RDP login.
+          # Do not use the old Xvfb/x11vnc/noVNC stack anymore.
+          if grep -qE '^\s*param=Xorg\s*$' /etc/xrdp/sesman.ini; then
+            sed -i 's/^\s*param=Xorg\s*$/param=\/usr\/lib\/Xorg/' /etc/xrdp/sesman.ini
+          fi
 
-          curl -fsSL "https://github.com/novnc/websockify/archive/refs/tags/v${WEBSOCKIFY_VERSION}.tar.gz" \
-            | tar -xz --strip-components=1 -C "$WEBSOCKIFY_DIR"
+          # Keep RDP private to the container. Public access is provided by
+          # the WebSocket tunnel below, not by exposing raw TCP/3389.
+          sed -i -E 's/^\s*port=.*/port=tcp:\/\/127.0.0.1:3389/' /etc/xrdp/xrdp.ini
 
-          python3 -m pip install --break-system-packages --no-cache-dir --no-deps "$WEBSOCKIFY_DIR"
+          mkdir -p /run/xrdp /var/log/xrdp
+          chmod 755 /run/xrdp
 
-          echo "NOVNC_DIR=$NOVNC_DIR" >> "$GITHUB_ENV"
+          WSTUNNEL_VERSION="10.7.1"
+          WSTUNNEL_ARCHIVE="wstunnel_${WSTUNNEL_VERSION}_linux_amd64.tar.gz"
+          WSTUNNEL_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/${WSTUNNEL_ARCHIVE}"
+          WSTUNNEL_CHECKSUMS_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/checksums.txt"
 
-          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
-            -o "$RUNNER_TEMP/ttyd"
-          chmod +x "$RUNNER_TEMP/ttyd"
-          "$RUNNER_TEMP/ttyd" --version
+          curl -fsSL "$WSTUNNEL_URL" -o "$RUNNER_TEMP/$WSTUNNEL_ARCHIVE"
+          curl -fsSL "$WSTUNNEL_CHECKSUMS_URL" -o "$RUNNER_TEMP/wstunnel-checksums.txt"
+          grep "  $WSTUNNEL_ARCHIVE$" "$RUNNER_TEMP/wstunnel-checksums.txt" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$WSTUNNEL_ARCHIVE" -C "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/wstunnel"
+          "$RUNNER_TEMP/wstunnel" --version
 
-          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64" \
-            -o "$RUNNER_TEMP/cloudflared"
-          chmod +x "$RUNNER_TEMP/cloudflared"
-          "$RUNNER_TEMP/cloudflared" --version
+          echo "RDP_USER=$XRDP_USER" >> "$GITHUB_ENV"
+          echo "RDP_PASSWORD=$XRDP_PASSWORD" >> "$GITHUB_ENV"
+          echo "WSTUNNEL_VERSION=$WSTUNNEL_VERSION" >> "$GITHUB_ENV"
 
-          Xvfb -help >/dev/null 2>&1 || true
-          x11vnc -version 2>&1 || true
-          python3 -m websockify --help >/dev/null 2>&1
-          command -v websockify >/dev/null
-          echo "websockify: $(command -v websockify)"
-          test -f "$NOVNC_DIR/vnc.html"
+          xrdp --version
+          Xorg -version 2>&1 | head -n 2
 
       - name: Show Arch environment
         shell: bash
@@ -109,56 +120,52 @@ jobs:
           nproc
           awk '/^model name/ {print; exit}' /proc/cpuinfo
 
-      - name: Start virtual desktop
-        env:
-          DISPLAY: :99
+      - name: Start xrdp desktop
         shell: bash
         run: |
           set -euo pipefail
-          echo 'DISPLAY=:99' >> "$GITHUB_ENV"
 
-          nohup Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset \
-            >"$RUNNER_TEMP/xvfb.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/xvfb.pid"
-
-          for _ in $(seq 1 30); do
-            xdpyinfo -display :99 >/dev/null 2>&1 && break
-            sleep 1
-          done
-          xdpyinfo -display :99 >/dev/null
-
-          nohup dbus-run-session -- startxfce4 \
-            >"$RUNNER_TEMP/xfce.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/xfce.pid"
-          sleep 3
-
-          nohup x11vnc -display :99 -forever -shared -localhost -rfbport 5900 -noxdamage -nopw \
-            >"$RUNNER_TEMP/x11vnc.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/x11vnc.pid"
-
-          nohup websockify --web="$NOVNC_DIR" 6080 127.0.0.1:5900 \
-            >"$RUNNER_TEMP/websockify.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/websockify.pid"
+          nohup xrdp-sesman --nodaemon \
+            >"$RUNNER_TEMP/xrdp-sesman.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/xrdp-sesman.pid"
 
           for _ in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null 2>&1 && break
+            [ -S /run/xrdp/sesman.socket ] && break
             sleep 1
           done
-          curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null
-          kill -0 "$(cat "$RUNNER_TEMP/xvfb.pid")"
-          kill -0 "$(cat "$RUNNER_TEMP/x11vnc.pid")"
-          kill -0 "$(cat "$RUNNER_TEMP/websockify.pid")"
-          echo "DESKTOP_LOCAL=http://127.0.0.1:6080/vnc.html"
+          [ -S /run/xrdp/sesman.socket ] || {
+            cat "$RUNNER_TEMP/xrdp-sesman.log"
+            exit 1
+          }
 
-      - name: Start hosted PTY and relay
+          nohup xrdp --nodaemon \
+            >"$RUNNER_TEMP/xrdp.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/xrdp.pid"
+
+          for _ in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/3389) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          (exec 3<>/dev/tcp/127.0.0.1/3389)
+          kill -0 "$(cat "$RUNNER_TEMP/xrdp-sesman.pid")"
+          kill -0 "$(cat "$RUNNER_TEMP/xrdp.pid")"
+
+          echo "RDP is listening privately on 127.0.0.1:3389"
+          echo "RDP user: $RDP_USER"
+
+      - name: Start hosted PTY and RDP WebSocket tunnel
         env:
           TERMINAL_SHELL: ${{ inputs.shell || 'bash' }}
         shell: bash
         run: |
           set -euo pipefail
+
           TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          RDP_TUNNEL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
           echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "RDP_TUNNEL_TOKEN=$RDP_TUNNEL_TOKEN" >> "$GITHUB_ENV"
           export TERMINAL_TOKEN="$TOKEN"
+          export RDP_TUNNEL_TOKEN="$RDP_TUNNEL_TOKEN"
 
           if [ "$TERMINAL_SHELL" = "sh" ]; then
             SHELL_CMD=/bin/sh
@@ -172,8 +179,17 @@ jobs:
             >"$RUNNER_TEMP/ttyd.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ttyd.pid"
 
-          export NOVNC_HTTP_URL="http://127.0.0.1:6080"
-          export NOVNC_WS_URL="ws://127.0.0.1:6080/websockify"
+          # wstunnel provides a TCP-to-WebSocket bridge for the native RDP
+          # protocol. It is locked to the local xrdp port and a random path
+          # prefix, so the public HTTP tunnel cannot be used as an open proxy.
+          nohup "$RUNNER_TEMP/wstunnel" server \
+            --restrict-http-upgrade-path-prefix "$RDP_TUNNEL_TOKEN" \
+            --restrict-to 127.0.0.1:3389 \
+            ws://127.0.0.1:8091 \
+            >"$RUNNER_TEMP/wstunnel.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/wstunnel.pid"
+
+          export RDP_WS_URL="ws://127.0.0.1:8091"
           nohup npm run relay >"$RUNNER_TEMP/relay.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/relay.pid"
 
@@ -182,9 +198,25 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:8090/healthz >/dev/null
-          curl -fsS http://127.0.0.1:8090/novnc/vnc.html >/dev/null
           kill -0 "$(cat "$RUNNER_TEMP/ttyd.pid")"
+          kill -0 "$(cat "$RUNNER_TEMP/wstunnel.pid")"
           kill -0 "$(cat "$RUNNER_TEMP/relay.pid")"
+
+          # Local end-to-end RDP tunnel smoke test before exposing the runner.
+          nohup "$RUNNER_TEMP/wstunnel" client \
+            --http-upgrade-path-prefix "$RDP_TUNNEL_TOKEN" \
+            -L "tcp://13389:127.0.0.1:3389" \
+            ws://127.0.0.1:8090 \
+            >"$RUNNER_TEMP/wstunnel-client-test.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/wstunnel-client-test.pid"
+
+          for _ in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/13389) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          (exec 3<>/dev/tcp/127.0.0.1/13389)
+          kill "$(cat "$RUNNER_TEMP/wstunnel-client-test.pid")" || true
+          echo "Local RDP-over-WebSocket tunnel test passed."
 
       - name: Start public Quick Tunnel
         shell: bash
@@ -206,26 +238,38 @@ jobs:
           WS_URL="${URL/https:\/\//wss://}/ws"
           ENDPOINT_URL="https://icy-person.github.io/terminal/?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$WS_URL")&token=$TOKEN_QS"
 
-          NOVNC_URL="$URL/novnc/vnc.html"
+          # Native RDP cannot speak directly to an HTTP Quick Tunnel. The
+          # client therefore uses wstunnel over the same Cloudflare WebSocket
+          # endpoint, then xfreerdp/Remmina connects to the local forwarded port.
+          RDP_WS_URL="${URL/https:\/\//wss://}"
+          RDP_LOCAL_PORT="33890"
+          RDP_CLIENT_CMD="$RUNNER_TEMP/wstunnel client --http-upgrade-path-prefix $RDP_TUNNEL_TOKEN -L tcp://$RDP_LOCAL_PORT:127.0.0.1:3389 $RDP_WS_URL"
 
           echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
           echo "TERMINAL_WS_URL=$WS_URL" >> "$GITHUB_ENV"
           echo "TERMINAL_PAGES_URL=$ENDPOINT_URL" >> "$GITHUB_ENV"
-          echo "NOVNC_URL=$NOVNC_URL" >> "$GITHUB_ENV"
+          echo "RDP_WS_URL_PUBLIC=$RDP_WS_URL" >> "$GITHUB_ENV"
+          echo "RDP_LOCAL_PORT=$RDP_LOCAL_PORT" >> "$GITHUB_ENV"
+
           echo "HOSTED TERMINAL: $ENDPOINT_URL"
-          echo "HOSTED DESKTOP: $NOVNC_URL"
+          echo "RDP WebSocket endpoint: $RDP_WS_URL"
+          echo "RDP user: $RDP_USER"
+          echo "RDP password: $RDP_PASSWORD"
+          echo "RDP local forward command: $RDP_CLIENT_CMD"
+          echo "Then connect your RDP client to: 127.0.0.1:$RDP_LOCAL_PORT"
 
       - name: End-to-end diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          echo "[1/4] local relay health"
+          echo "[1/3] local relay health"
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
 
-          echo "[2/4] local noVNC"
-          curl -fsSI http://127.0.0.1:8090/novnc/vnc.html
+          echo "[2/3] local RDP socket"
+          (exec 3<>/dev/tcp/127.0.0.1/3389)
+          echo "xrdp is reachable on 127.0.0.1:3389"
 
-          echo "[3/4] public health"
+          echo "[3/3] public health"
           PUBLIC_OK=0
           PUBLIC_HOST="${TERMINAL_URL#https://}"
           for _ in $(seq 1 30); do
@@ -238,21 +282,17 @@ jobs:
             sleep 2
           done
           [ "$PUBLIC_OK" -eq 1 ]
-
-          echo "[4/4] public noVNC HTTP"
-          for _ in $(seq 1 15); do
-            curl -4 --connect-timeout 5 --max-time 15 -fsSI "$TERMINAL_URL/novnc/vnc.html" && break
-            sleep 2
-          done
-          curl -4 --connect-timeout 5 --max-time 15 -fsSI "$TERMINAL_URL/novnc/vnc.html"
           echo "Diagnostics passed."
 
-      - name: Keep terminal and desktop alive
+      - name: Keep terminal and RDP alive
         shell: bash
         run: |
           set -euo pipefail
           echo "Terminal: $TERMINAL_PAGES_URL"
-          echo "Desktop: $NOVNC_URL"
+          echo "RDP WebSocket: $RDP_WS_URL_PUBLIC"
+          echo "RDP user: $RDP_USER"
+          echo "RDP password: $RDP_PASSWORD"
+          echo "Run the printed wstunnel client command locally, then connect your RDP client to 127.0.0.1:$RDP_LOCAL_PORT."
           echo "Runner services remain available until cancellation/timeout."
           while true; do
             sleep "${{ inputs.idle_seconds || '5' }}"
