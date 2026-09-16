@@ -7,8 +7,8 @@ const TOKEN = process.env.TERMINAL_TOKEN;
 const UPSTREAM = process.env.TTYD_WS_URL || "ws://127.0.0.1:7681/ws";
 const MAX_CLIENTS = Number(process.env.RELAY_MAX_CLIENTS || 8);
 
-if (!TOKEN || TOKEN.length < 64) {
-  throw new Error("TERMINAL_TOKEN must contain at least 64 characters");
+if (!TOKEN || TOKEN.length < 32) {
+  throw new Error("TERMINAL_TOKEN must contain at least 32 characters");
 }
 
 const server = http.createServer((req, res) => {
