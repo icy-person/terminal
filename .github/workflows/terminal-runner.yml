@@ -166,10 +166,27 @@ jobs:
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
           echo "[2/4] local noVNC"
           curl -fsSI http://127.0.0.1:8090/novnc/vnc.html
+
           echo "[3/4] public health"
-          curl -fsS "$TERMINAL_URL/healthz" | python3 -m json.tool
+          PUBLIC_OK=0
+          PUBLIC_HOST="${TERMINAL_URL#https://}"
+          for _ in $(seq 1 30); do
+            if getent ahostsv4 "$PUBLIC_HOST" >/dev/null 2>&1 && \
+               curl -4 --connect-timeout 5 --max-time 15 -fsS "$TERMINAL_URL/healthz" | python3 -m json.tool; then
+              PUBLIC_OK=1
+              break
+            fi
+            echo "Public endpoint not ready yet; retrying DNS/tunnel..."
+            sleep 2
+          done
+          [ "$PUBLIC_OK" -eq 1 ]
+
           echo "[4/4] public noVNC HTTP"
-          curl -fsSI "$TERMINAL_URL/novnc/vnc.html"
+          for _ in $(seq 1 15); do
+            curl -4 --connect-timeout 5 --max-time 15 -fsSI "$TERMINAL_URL/novnc/vnc.html" && break
+            sleep 2
+          done
+          curl -4 --connect-timeout 5 --max-time 15 -fsSI "$TERMINAL_URL/novnc/vnc.html"
           echo "Diagnostics passed."
 
       - name: Keep terminal and desktop alive
