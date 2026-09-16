@@ -107,7 +107,7 @@ jobs:
           echo
           echo "=== CPU ==="
           nproc
-          grep -m1 'model name' /proc/cpuinfo || true
+          awk '/^model name/ {print; exit}' /proc/cpuinfo
 
       - name: Start virtual desktop
         env:
