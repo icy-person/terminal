@@ -35,8 +35,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // noVNC is a normal HTTP application. Strip /novnc and proxy the remaining
-  // path to websockify's embedded web server on :6080.
   if (url.pathname === "/novnc" || url.pathname.startsWith("/novnc/")) {
     proxyNoVncHttp(req, res, url);
     return;
@@ -59,8 +57,14 @@ const novncWss = new WebSocketServer({
   perMessageDeflate: false
 });
 
-function authorized(url) {
-  const supplied = url.searchParams.get("token") || "";
+function cookieToken(req) {
+  const cookies = req.headers.cookie || "";
+  const match = cookies.match(/(?:^|;\s*)terminal_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function authorized(url, req = null) {
+  const supplied = url.searchParams.get("token") || (req ? cookieToken(req) : "");
   return supplied.length === TOKEN.length && supplied === TOKEN;
 }
 
@@ -71,7 +75,11 @@ function proxyNoVncHttp(req, res, url) {
     method: req.method,
     headers: { ...req.headers, host: target.host, connection: "close" }
   }, upstreamRes => {
-    res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+    const headers = { ...upstreamRes.headers };
+    const cookie = `terminal_token=${encodeURIComponent(TOKEN)}; Path=/novnc; HttpOnly; Secure; SameSite=Strict`;
+    const existing = headers["set-cookie"];
+    headers["set-cookie"] = existing ? [...(Array.isArray(existing) ? existing : [existing]), cookie] : [cookie];
+    res.writeHead(upstreamRes.statusCode || 502, headers);
     upstreamRes.pipe(res);
   });
   upstreamReq.on("error", error => {
@@ -96,7 +104,7 @@ server.on("upgrade", (req, socket, head) => {
   if (url.pathname !== "/ws") {
     metrics.rejected++; socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"); socket.destroy(); return;
   }
-  if (!authorized(url)) {
+  if (!authorized(url, req)) {
     metrics.rejected++; console.log("WS_REJECT unauthorized websocket upgrade");
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"); socket.destroy(); return;
   }
@@ -111,7 +119,7 @@ server.on("upgrade", (req, socket, head) => {
 
 function handleNoVncUpgrade(req, socket, head, url) {
   metrics.novncUpgrades++;
-  if (!authorized(url)) {
+  if (!authorized(url, req)) {
     metrics.novncRejected++;
     console.log("NOVNC_WS_REJECT unauthorized websocket upgrade");
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -119,6 +127,7 @@ function handleNoVncUpgrade(req, socket, head, url) {
     return;
   }
   metrics.novncAuthorized++;
+  console.log("NOVNC_WS_UPGRADE authorized");
   novncWss.handleUpgrade(req, socket, head, browserWs => novncWss.emit("connection", browserWs, req));
 }
 
