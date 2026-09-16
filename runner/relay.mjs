@@ -90,13 +90,22 @@ function proxyNoVncHttp(req, res, url) {
   req.pipe(upstreamReq);
 }
 
+function normalizeNoVncWsPath(pathname) {
+  // noVNC versions differ in how they resolve a path beginning with '/'.
+  // Normalize repeated leading slashes so both /novnc/websockify and
+  // //novnc/websockify reach the same relay endpoint.
+  return pathname.replace(/^\/+/, "/");
+}
+
 server.on("upgrade", (req, socket, head) => {
   metrics.upgrades++;
   let url;
   try { url = new URL(req.url, `http://${req.headers.host || "localhost"}`); }
   catch { metrics.rejected++; socket.destroy(); return; }
 
-  if (url.pathname === "/novnc/websockify" || url.pathname === "/novnc/websockify/") {
+  const normalizedPath = normalizeNoVncWsPath(url.pathname);
+  if (normalizedPath === "/novnc/websockify" || normalizedPath === "/novnc/websockify/") {
+    console.log(`NOVNC_WS_ROUTE raw=${url.pathname} normalized=${normalizedPath}`);
     handleNoVncUpgrade(req, socket, head, url);
     return;
   }
