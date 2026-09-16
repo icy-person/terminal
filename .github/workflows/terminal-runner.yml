@@ -83,6 +83,7 @@ jobs:
           print(secrets.token_hex(32))
           PY
           )"
+          echo "::add-mask::$TOKEN"
           printf '%s' "$TOKEN" > "$RUNNER_TEMP/terminal-token"
           chmod 600 "$RUNNER_TEMP/terminal-token"
           echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
@@ -167,7 +168,7 @@ jobs:
           echo "WebSocket endpoint: $WS_URL"
           echo "Pages connect URL:  $ENDPOINT_URL"
           echo "Token is embedded only in the generated connect URL."
-          echo "The token is not printed separately."
+          echo "The token is masked in subsequent logs."
           echo "============================================================"
           echo ""
 
@@ -181,47 +182,97 @@ jobs:
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
 
           echo "[2/3] Public Cloudflare -> relay health"
-          curl -fsS --max-time 15 "${TERMINAL_URL}/healthz" | python3 -m json.tool
+          PUBLIC_HEALTH_OK=0
+          for attempt in $(seq 1 30); do
+            echo "  public health attempt ${attempt}/30"
+            if curl -fsS --connect-timeout 3 --max-time 10 "${TERMINAL_URL}/healthz" > "$RUNNER_TEMP/public-health.json" 2> "$RUNNER_TEMP/public-health.err"; then
+              python3 -m json.tool < "$RUNNER_TEMP/public-health.json"
+              PUBLIC_HEALTH_OK=1
+              break
+            fi
+            cat "$RUNNER_TEMP/public-health.err" || true
+            sleep 2
+          done
+
+          if [ "$PUBLIC_HEALTH_OK" -ne 1 ]; then
+            echo "[PUBLIC_HEALTH_FAIL] Cloudflare hostname did not become reachable"
+            echo "--- cloudflared log ---"
+            tail -n 100 "$RUNNER_TEMP/cloudflared.log" || true
+            exit 1
+          fi
 
           echo "[3/3] Public WebSocket upgrade + ttyd handshake"
           node <<'NODE'
           import WebSocket from "ws";
 
-          const url = new URL(process.env.TERMINAL_WS_URL);
-          url.searchParams.set("token", process.env.TERMINAL_TOKEN);
-          const ws = new WebSocket(url, { perMessageDeflate: false });
-          const timeout = setTimeout(() => {
-            console.error("[WS_DIAGNOSTIC_FAIL] timeout waiting for WebSocket/ttyd data");
-            ws.close();
-            process.exit(1);
-          }, 15000);
+          const target = new URL(process.env.TERMINAL_WS_URL);
+          target.searchParams.set("token", process.env.TERMINAL_TOKEN);
+          const deadline = Date.now() + 60000;
+          let attempt = 0;
 
-          ws.once("open", () => {
-            console.log("[WS_UPGRADE_OK] Cloudflare -> relay WebSocket upgrade succeeded");
-            ws.send(JSON.stringify({ columns: 100, rows: 30 }));
-          });
+          function connect() {
+            attempt += 1;
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
+              console.error("[WS_DIAGNOSTIC_FAIL] timed out waiting for public WebSocket");
+              process.exit(1);
+            }
 
-          ws.once("message", (data) => {
-            clearTimeout(timeout);
-            const bytes = Buffer.from(data);
-            console.log(`[PTY_DATA_OK] received ${bytes.length} bytes from ttyd through relay`);
-            console.log(`[PTY_DATA_PREFIX] 0x${bytes[0]?.toString(16).padStart(2, "0")}`);
-            ws.close(1000, "diagnostic complete");
-            process.exit(0);
-          });
+            console.log(`[WS_ATTEMPT] ${attempt}`);
+            const ws = new WebSocket(target, { perMessageDeflate: false });
+            let finished = false;
+            const timer = setTimeout(() => {
+              if (finished) return;
+              finished = true;
+              try { ws.terminate(); } catch {}
+              console.log("[WS_RETRY] timeout; retrying");
+              setTimeout(connect, 1000);
+            }, Math.min(10000, remaining));
 
-          ws.once("unexpected-response", (_request, response) => {
-            clearTimeout(timeout);
-            console.error(`[WS_DIAGNOSTIC_FAIL] HTTP ${response.statusCode} during upgrade`);
-            process.exit(1);
-          });
+            ws.once("open", () => {
+              if (finished) return;
+              console.log("[WS_UPGRADE_OK] Cloudflare -> relay WebSocket upgrade succeeded");
+              ws.send(JSON.stringify({ columns: 100, rows: 30 }));
+            });
 
-          ws.once("error", (error) => {
-            clearTimeout(timeout);
-            console.error(`[WS_DIAGNOSTIC_FAIL] ${error.message}`);
-            process.exit(1);
-          });
+            ws.once("message", (data) => {
+              if (finished) return;
+              finished = true;
+              clearTimeout(timer);
+              const bytes = Buffer.from(data);
+              console.log(`[PTY_DATA_OK] received ${bytes.length} bytes from ttyd through relay`);
+              console.log(`[PTY_DATA_PREFIX] 0x${bytes[0]?.toString(16).padStart(2, "0")}`);
+              ws.close(1000, "diagnostic complete");
+              process.exit(0);
+            });
+
+            ws.once("unexpected-response", (_request, response) => {
+              if (finished) return;
+              finished = true;
+              clearTimeout(timer);
+              console.log(`[WS_HTTP_RESPONSE] HTTP ${response.statusCode}; retrying`);
+              try { ws.terminate(); } catch {}
+              setTimeout(connect, 1000);
+            });
+
+            ws.once("error", (error) => {
+              if (finished) return;
+              finished = true;
+              clearTimeout(timer);
+              console.log(`[WS_RETRY] ${error.message}`);
+              setTimeout(connect, 1000);
+            });
+          }
+
+          connect();
           NODE
+
+          echo "--- relay diagnostic state ---"
+          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
+          echo "--- ttyd log ---"
+          tail -n 50 "$RUNNER_TEMP/ttyd.log" || true
+          echo "--- relay log ---"
+          tail -n 100 "$RUNNER_TEMP/relay.log" || true
 
       - name: Write connection summary
         shell: bash
