@@ -110,10 +110,19 @@ jobs:
             > "$RUNNER_TEMP/relay.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/relay.pid"
 
+          RELAY_READY=0
           for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then break; fi
+            if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+              RELAY_READY=1
+              break
+            fi
             sleep 1
           done
+          if [ "$RELAY_READY" -ne 1 ]; then
+            echo "relay health check timed out"
+            cat "$RUNNER_TEMP/relay.log" || true
+            exit 1
+          fi
 
           if ! kill -0 "$(cat "$RUNNER_TEMP/ttyd.pid")" 2>/dev/null; then
             echo "ttyd failed to start"
@@ -143,7 +152,7 @@ jobs:
           echo $! > "$RUNNER_TEMP/cloudflared.pid"
 
           URL=""
-          for _ in $(seq 1 45); do
+          for _ in $(seq 1 60); do
             URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"
             [ -n "$URL" ] && break
             sleep 2
@@ -152,6 +161,50 @@ jobs:
           if [ -z "$URL" ]; then
             echo "Cloudflare tunnel did not provide a public URL"
             cat "$RUNNER_TEMP/cloudflared.log"
+            exit 1
+          fi
+
+          HOSTNAME="${URL#https://}"
+          echo "Quick Tunnel hostname: $HOSTNAME"
+          echo "Waiting for public DNS to publish the Quick Tunnel hostname..."
+
+          DNS_OK=0
+          for attempt in $(seq 1 150); do
+            if getent ahostsv4 "$HOSTNAME" >/dev/null 2>&1; then
+              echo "[DNS_READY] system resolver resolves $HOSTNAME"
+              DNS_OK=1
+              break
+            fi
+
+            DOH_JSON="$(curl -fsS --connect-timeout 3 --max-time 8 \
+              --resolve cloudflare-dns.com:443:1.1.1.1 \
+              -H 'accept: application/dns-json' \
+              "https://cloudflare-dns.com/dns-query?name=${HOSTNAME}&type=A" 2>/dev/null || true)"
+            if [ -n "$DOH_JSON" ] && python3 - "$DOH_JSON" <<'PY'
+          import json, sys
+          try:
+              data = json.loads(sys.argv[1])
+              answers = data.get("Answer", [])
+              raise SystemExit(0 if any(a.get("type") == 1 and a.get("data") for a in answers) else 1)
+          except Exception:
+              raise SystemExit(1)
+          PY
+            then
+              echo "[DNS_READY] Cloudflare public DNS resolves $HOSTNAME"
+              DNS_OK=1
+              break
+            fi
+
+            if (( attempt == 1 || attempt % 10 == 0 )); then
+              echo "  DNS attempt ${attempt}/150: not visible yet"
+            fi
+            sleep 2
+          done
+
+          if [ "$DNS_OK" -ne 1 ]; then
+            echo "[DNS_FAIL] Quick Tunnel hostname was not published after 5 minutes"
+            echo "--- cloudflared log ---"
+            tail -n 100 "$RUNNER_TEMP/cloudflared.log" || true
             exit 1
           fi
 
@@ -178,30 +231,47 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "[1/3] Local relay health"
+          echo "[1/4] Local relay health"
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
 
-          echo "[2/3] Public Cloudflare -> relay health"
+          echo "[2/4] Public DNS + Cloudflare -> relay health"
           PUBLIC_HEALTH_OK=0
-          for attempt in $(seq 1 30); do
-            echo "  public health attempt ${attempt}/30"
-            if curl -fsS --connect-timeout 3 --max-time 10 "${TERMINAL_URL}/healthz" > "$RUNNER_TEMP/public-health.json" 2> "$RUNNER_TEMP/public-health.err"; then
+          PUBLIC_HEALTH_MODE="system-dns"
+          for attempt in $(seq 1 60); do
+            echo "  public health attempt ${attempt}/60"
+            if curl -fsS --connect-timeout 5 --max-time 15 "${TERMINAL_URL}/healthz" > "$RUNNER_TEMP/public-health.json" 2> "$RUNNER_TEMP/public-health.err"; then
               python3 -m json.tool < "$RUNNER_TEMP/public-health.json"
               PUBLIC_HEALTH_OK=1
               break
             fi
-            cat "$RUNNER_TEMP/public-health.err" || true
+
+            if curl -fsS --connect-timeout 5 --max-time 15 \
+              --doh-url https://cloudflare-dns.com/dns-query \
+              --resolve cloudflare-dns.com:443:1.1.1.1 \
+              "${TERMINAL_URL}/healthz" > "$RUNNER_TEMP/public-health.json" 2> "$RUNNER_TEMP/public-health-doh.err"; then
+              python3 -m json.tool < "$RUNNER_TEMP/public-health.json"
+              PUBLIC_HEALTH_OK=1
+              PUBLIC_HEALTH_MODE="cloudflare-doh"
+              break
+            fi
+
+            cat "$RUNNER_TEMP/public-health.err" 2>/dev/null || true
             sleep 2
           done
 
           if [ "$PUBLIC_HEALTH_OK" -ne 1 ]; then
             echo "[PUBLIC_HEALTH_FAIL] Cloudflare hostname did not become reachable"
+            echo "--- normal DNS error ---"
+            cat "$RUNNER_TEMP/public-health.err" 2>/dev/null || true
+            echo "--- DoH error ---"
+            cat "$RUNNER_TEMP/public-health-doh.err" 2>/dev/null || true
             echo "--- cloudflared log ---"
             tail -n 100 "$RUNNER_TEMP/cloudflared.log" || true
             exit 1
           fi
+          echo "[PUBLIC_HEALTH_OK] mode=${PUBLIC_HEALTH_MODE}"
 
-          echo "[3/3] Public WebSocket upgrade + ttyd handshake"
+          echo "[3/4] Public WebSocket upgrade + ttyd protocol handshake"
           node <<'NODE'
           import WebSocket from "ws";
 
@@ -232,6 +302,7 @@ jobs:
             ws.once("open", () => {
               if (finished) return;
               console.log("[WS_UPGRADE_OK] Cloudflare -> relay WebSocket upgrade succeeded");
+              // ttyd's initial client message is raw JSON. The relay must preserve it byte-for-byte.
               ws.send(JSON.stringify({ columns: 100, rows: 30 }));
             });
 
@@ -242,6 +313,10 @@ jobs:
               const bytes = Buffer.from(data);
               console.log(`[PTY_DATA_OK] received ${bytes.length} bytes from ttyd through relay`);
               console.log(`[PTY_DATA_PREFIX] 0x${bytes[0]?.toString(16).padStart(2, "0")}`);
+              if (bytes[0] !== 0x30 && bytes[0] !== 0x31 && bytes[0] !== 0x32 && bytes[0] !== 0x7b) {
+                console.error("[PTY_PROTOCOL_FAIL] unexpected ttyd message prefix");
+                process.exit(1);
+              }
               ws.close(1000, "diagnostic complete");
               process.exit(0);
             });
@@ -267,7 +342,7 @@ jobs:
           connect();
           NODE
 
-          echo "--- relay diagnostic state ---"
+          echo "[4/4] Relay/PTY state after WebSocket diagnostic"
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
           echo "--- ttyd log ---"
           tail -n 50 "$RUNNER_TEMP/ttyd.log" || true
@@ -325,7 +400,7 @@ jobs:
               echo "ERROR: relay health check failed"
               exit 1
             }
-            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive clients=%s upgrades=%s authorized=%s rejected=%s c2u=%s u2c=%s url=%s\n' \
+            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive clients=%s upgrades=%s authorized=%s rejected=%s c2u=%s u2c=%s queued=%s url=%s\n' \
               "$(date -Is)" "$RUNNER_NAME" \
               "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["clients"])' <<<"$HEALTH")" \
               "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["upgrades"])' <<<"$HEALTH")" \
@@ -333,6 +408,7 @@ jobs:
               "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["rejected"])' <<<"$HEALTH")" \
               "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesClientToUpstream"])' <<<"$HEALTH")" \
               "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesUpstreamToClient"])' <<<"$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["queuedClientMessages"])' <<<"$HEALTH")" \
               "${TERMINAL_URL:-unknown}"
             sleep "${IDLE_SECONDS:-5}"
           done
