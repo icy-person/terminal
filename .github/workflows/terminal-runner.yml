@@ -1,4 +1,4 @@
-name: GitHub Hosted Terminal Runner (Fixed)
+name: GitHub Hosted Terminal Runner (Arch)
 
 on:
   workflow_dispatch:
@@ -24,30 +24,49 @@ concurrency:
 
 jobs:
   terminal:
-    name: Hosted terminal + noVNC desktop (Ubuntu, fixed)
-    runs-on: ubuntu-24.04
+    name: Hosted terminal + noVNC desktop (Arch)
+    runs-on: ubuntu-26.04
     timeout-minutes: 350
+
+    container:
+      image: archlinux:latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Node dependencies
+        shell: bash
         run: |
           set -euo pipefail
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm nodejs npm python curl ca-certificates
           npm install --no-audit --no-fund --ignore-scripts
 
       - name: Install terminal and desktop stack
+        shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal dbus-x11 xvfb x11vnc novnc websockify curl x11-utils
 
-          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" -o "$RUNNER_TEMP/ttyd"
+          pacman -S --needed --noconfirm \
+            xfce4 \
+            xfce4-terminal \
+            dbus \
+            dbus-x11 \
+            xorg-server-xvfb \
+            x11vnc \
+            novnc \
+            websockify \
+            xorg-xdpyinfo \
+            curl
+
+          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
+            -o "$RUNNER_TEMP/ttyd"
           chmod +x "$RUNNER_TEMP/ttyd"
           "$RUNNER_TEMP/ttyd" --version
 
-          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64" -o "$RUNNER_TEMP/cloudflared"
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64" \
+            -o "$RUNNER_TEMP/cloudflared"
           chmod +x "$RUNNER_TEMP/cloudflared"
           "$RUNNER_TEMP/cloudflared" --version
 
@@ -57,9 +76,27 @@ jobs:
           command -v websockify >/dev/null
           echo "websockify: $(command -v websockify)"
 
+      - name: Show Arch environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== OS ==="
+          cat /etc/os-release
+          echo
+          echo "=== Kernel ==="
+          uname -a
+          echo
+          echo "=== glibc ==="
+          ldd --version | head -n 1
+          echo
+          echo "=== CPU ==="
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+
       - name: Start virtual desktop
         env:
           DISPLAY: :99
+        shell: bash
         run: |
           set -euo pipefail
           echo 'DISPLAY=:99' >> "$GITHUB_ENV"
@@ -74,7 +111,8 @@ jobs:
           done
           xdpyinfo -display :99 >/dev/null
 
-          nohup dbus-run-session -- startxfce4 >"$RUNNER_TEMP/xfce.log" 2>&1 &
+          nohup dbus-run-session -- startxfce4 \
+            >"$RUNNER_TEMP/xfce.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/xfce.pid"
           sleep 3
 
@@ -99,6 +137,7 @@ jobs:
       - name: Start hosted PTY and relay
         env:
           TERMINAL_SHELL: ${{ inputs.shell || 'bash' }}
+        shell: bash
         run: |
           set -euo pipefail
           TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
@@ -132,6 +171,7 @@ jobs:
           kill -0 "$(cat "$RUNNER_TEMP/relay.pid")"
 
       - name: Start public Quick Tunnel
+        shell: bash
         run: |
           set -euo pipefail
           nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://127.0.0.1:8090 \
@@ -150,10 +190,6 @@ jobs:
           WS_URL="${URL/https:\/\//wss://}/ws"
           ENDPOINT_URL="https://icy-person.github.io/terminal/?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$WS_URL")&token=$TOKEN_QS"
 
-          # The clean desktop URL is intentionally fixed at /novnc/vnc.html.
-          # The relay sets an HttpOnly auth cookie on the initial HTTP request;
-          # noVNC then uses its normal relative "websockify" path, which resolves
-          # to /novnc/websockify.
           NOVNC_URL="$URL/novnc/vnc.html"
 
           echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
@@ -164,10 +200,12 @@ jobs:
           echo "HOSTED DESKTOP: $NOVNC_URL"
 
       - name: End-to-end diagnostics
+        shell: bash
         run: |
           set -euo pipefail
           echo "[1/4] local relay health"
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
+
           echo "[2/4] local noVNC"
           curl -fsSI http://127.0.0.1:8090/novnc/vnc.html
 
@@ -194,6 +232,7 @@ jobs:
           echo "Diagnostics passed."
 
       - name: Keep terminal and desktop alive
+        shell: bash
         run: |
           set -euo pipefail
           echo "Terminal: $TERMINAL_PAGES_URL"
