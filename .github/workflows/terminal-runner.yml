@@ -89,8 +89,10 @@ jobs:
 
           if [ "$TERMINAL_SHELL" = "sh" ]; then
             SHELL_CMD="/bin/sh"
+            SHELL_ARGS=()
           else
             SHELL_CMD="/bin/bash"
+            SHELL_ARGS=("--login")
           fi
 
           nohup "$RUNNER_TEMP/ttyd" \
@@ -98,7 +100,7 @@ jobs:
             -p 7681 \
             -i 127.0.0.1 \
             -P 8 \
-            "$SHELL_CMD" --login \
+            "$SHELL_CMD" "${SHELL_ARGS[@]}" \
             > "$RUNNER_TEMP/ttyd.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ttyd.pid"
 
@@ -214,7 +216,6 @@ jobs:
               tail -n 50 "$RUNNER_TEMP/cloudflared.log" || true
               exit 1
             fi
-
             if ! curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
               echo "ERROR: relay health check failed"
               exit 1
