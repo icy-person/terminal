@@ -55,7 +55,7 @@ jobs:
           print(secrets.token_hex(32))
           PY
           )"
-          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN"
           printf '%s' "$TOKEN" > "$RUNNER_TEMP/terminal-token"
           chmod 600 "$RUNNER_TEMP/terminal-token"
           echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
