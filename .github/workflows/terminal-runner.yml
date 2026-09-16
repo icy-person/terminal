@@ -96,18 +96,22 @@ jobs:
           node <<'NODE'
           import WebSocket from "ws";
           const ws = new WebSocket("ws://127.0.0.1:7681/ws", "tty", { origin: "http://127.0.0.1:7681", perMessageDeflate: false, handshakeTimeout: 8000 });
-          let sentInit = false, sentInput = false, gotData = false;
+          let sentInput = false, gotData = false;
           const timer = setTimeout(() => { console.error("[LOCAL_FAIL] ttyd input/output timeout"); ws.terminate(); process.exitCode = 1; }, 15000);
-          ws.on("open", () => console.log(`[LOCAL_OPEN] subprotocol=${ws.protocol}`));
+          ws.on("open", () => {
+            console.log(`[LOCAL_OPEN] subprotocol=${ws.protocol}`);
+            ws.send(JSON.stringify({ columns: 100, rows: 30 }));
+            console.log("[LOCAL_INIT] sent initial ttyd window JSON");
+          });
           ws.on("message", data => {
             const b = Buffer.from(data);
             console.log(`[LOCAL_MESSAGE] bytes=${b.length} prefix=0x${b[0]?.toString(16).padStart(2,"0")}`);
-            if (!sentInit) { sentInit = true; ws.send(JSON.stringify({ columns: 100, rows: 30 })); }
             if (!sentInput && b[0] === 0x32) {
               sentInput = true;
-              const input = Buffer.from([0x30, 0x0a]);
-              ws.send(input);
-              console.log("[LOCAL_INPUT] sent newline through ttyd INPUT protocol");
+              setTimeout(() => {
+                ws.send(Buffer.from([0x30, ...Buffer.from("echo __TTYD_LOCAL_OK__\n")]));
+                console.log("[LOCAL_INPUT] sent delayed INPUT protocol payload");
+              }, 1000);
             }
             if (b[0] === 0x30) gotData = true;
             if (gotData) { clearTimeout(timer); console.log("[LOCAL_TTYD_OK] ttyd protocol and PTY input/output are alive"); ws.close(1000, "diagnostic complete"); process.exitCode = 0; }
@@ -126,18 +130,22 @@ jobs:
           const u = new URL(process.env.TERMINAL_WS_URL);
           u.searchParams.set("token", process.env.TERMINAL_TOKEN);
           const ws = new WebSocket(u, "tty", { perMessageDeflate: false, handshakeTimeout: 10000 });
-          let sentInit = false, sentInput = false, gotPty = false;
+          let sentInput = false, gotPty = false;
           const timer = setTimeout(() => { console.error("[PUBLIC_FAIL] ttyd input/output timeout"); ws.terminate(); process.exitCode = 1; }, 18000);
-          ws.on("open", () => console.log(`[PUBLIC_OPEN] subprotocol=${ws.protocol}`));
+          ws.on("open", () => {
+            console.log(`[PUBLIC_OPEN] subprotocol=${ws.protocol}`);
+            ws.send(JSON.stringify({ columns: 100, rows: 30 }));
+            console.log("[PUBLIC_INIT] sent initial ttyd window JSON");
+          });
           ws.on("message", data => {
             const b = Buffer.from(data);
             console.log(`[PUBLIC_MESSAGE] bytes=${b.length} prefix=0x${b[0]?.toString(16).padStart(2,"0")}`);
-            if (!sentInit) { sentInit = true; ws.send(JSON.stringify({ columns: 100, rows: 30 })); }
             if (!sentInput && b[0] === 0x32) {
               sentInput = true;
-              const input = Buffer.from([0x30, 0x0a]);
-              ws.send(input);
-              console.log("[PUBLIC_INPUT] sent newline through relay/ttyd INPUT protocol");
+              setTimeout(() => {
+                ws.send(Buffer.from([0x30, ...Buffer.from("echo __TTYD_PUBLIC_OK__\n")]));
+                console.log("[PUBLIC_INPUT] sent delayed INPUT protocol payload");
+              }, 1000);
             }
             if (b[0] === 0x30) gotPty = true;
             if (gotPty) { clearTimeout(timer); console.log("[PUBLIC_TTYD_OK] Cloudflare -> relay -> ttyd input/output is working"); ws.close(1000, "diagnostic complete"); process.exitCode = 0; }
