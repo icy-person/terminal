@@ -40,21 +40,35 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm nodejs npm python python-pip curl ca-certificates
+          pacman -S --needed --noconfirm nodejs npm python python-pip git base-devel sudo curl ca-certificates tar
           npm install --no-audit --no-fund --ignore-scripts
 
-      - name: Install terminal and RDP desktop stack
+      - name: Build and install Arch RDP packages
         shell: bash
         run: |
           set -euo pipefail
+
+          # xrdp and xorgxrdp are AUR packages on current Arch Linux.
+          # Build them inside the Arch container instead of assuming they are
+          # available from the official binary repositories.
+          useradd -m -s /bin/bash aurbuilder
+          printf 'aurbuilder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/aurbuilder
+          chmod 440 /etc/sudoers.d/aurbuilder
+
+          rm -rf "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp"
+          git clone --depth=1 https://aur.archlinux.org/xrdp.git "$RUNNER_TEMP/aur-xrdp"
+          git clone --depth=1 https://aur.archlinux.org/xorgxrdp.git "$RUNNER_TEMP/aur-xorgxrdp"
+          chown -R aurbuilder:aurbuilder "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp"
+
+          su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xrdp' && makepkg -si --noconfirm --needed"
+          su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xorgxrdp' && makepkg -si --noconfirm --needed"
 
           pacman -S --needed --noconfirm \
             xfce4 \
             xfce4-terminal \
             dbus \
             xorg \
-            xrdp \
-            xorgxrdp \
+            xorg-xinit \
             curl \
             tar
 
@@ -83,6 +97,18 @@ EOF
 
           mkdir -p /run/xrdp /var/log/xrdp
           chmod 755 /run/xrdp
+
+          # Restore the two small standalone binaries used by the existing
+          # hosted terminal architecture.
+          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
+            -o "$RUNNER_TEMP/ttyd"
+          chmod +x "$RUNNER_TEMP/ttyd"
+          "$RUNNER_TEMP/ttyd" --version
+
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64" \
+            -o "$RUNNER_TEMP/cloudflared"
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" --version
 
           WSTUNNEL_VERSION="10.7.1"
           WSTUNNEL_ARCHIVE="wstunnel_${WSTUNNEL_VERSION}_linux_amd64.tar.gz"
