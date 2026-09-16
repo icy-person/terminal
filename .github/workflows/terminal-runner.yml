@@ -86,6 +86,7 @@ jobs:
           printf '%s' "$TOKEN" > "$RUNNER_TEMP/terminal-token"
           chmod 600 "$RUNNER_TEMP/terminal-token"
           echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          export TERMINAL_TOKEN="$TOKEN"
 
           if [ "$TERMINAL_SHELL" = "sh" ]; then
             SHELL_CMD="/bin/sh"
