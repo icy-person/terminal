@@ -86,7 +86,7 @@ jobs:
           "$RUNNER_TEMP/cloudflared" --version
 
           Xvfb -help >/dev/null 2>&1 || true
-          x11vnc -version 2>&1 | head -n 1 || true
+          x11vnc -version 2>&1 || true
           python3 -m websockify --help >/dev/null 2>&1
           command -v websockify >/dev/null
           echo "websockify: $(command -v websockify)"
@@ -103,7 +103,7 @@ jobs:
           uname -a
           echo
           echo "=== glibc ==="
-          ldd --version | head -n 1
+          ldd --version 2>&1
           echo
           echo "=== CPU ==="
           nproc
