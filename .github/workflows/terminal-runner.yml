@@ -1,162 +1,219 @@
-name: Terminal Runner Bridge
+name: GitHub Hosted Terminal Runner
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Runner bridge mode"
+      shell:
+        description: "Shell to run inside the hosted runner"
         required: true
-        default: "terminal"
+        default: "bash"
         type: choice
         options:
-          - terminal
+          - bash
+          - sh
       idle_seconds:
-        description: "Polling interval used by the bridge loop"
+        description: "Health-check interval"
         required: true
-        default: "2"
+        default: "3"
         type: string
-  push:
-    branches: ["main"]
-    paths:
-      - ".github/workflows/terminal-runner.yml"
-
-# IMPORTANT:
-# Use a SELF-HOSTED runner for a persistent terminal session.
-# GitHub-hosted runners are ephemeral and are not suitable for a permanent
-# browser -> shell connection.
 
 permissions:
   contents: read
 
+# GitHub-hosted runners are ephemeral. This workflow keeps one job alive
+# for the duration of the workflow and exposes the PTY only through an
+# outbound Cloudflare Quick Tunnel connection.
 concurrency:
-  group: terminal-runner-bridge
+  group: hosted-terminal
   cancel-in-progress: true
 
 jobs:
-  terminal-runner:
-    name: Persistent terminal bridge
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 360
+  terminal:
+    name: Hosted terminal (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare runtime
+      - name: Show runner information
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/terminal-bridge"
-          printf '%s\n' "Starting terminal runner bridge"
-          printf '%s\n' "Runner: $RUNNER_NAME"
-          printf '%s\n' "Host: $(hostname)"
-          printf '%s\n' "OS: $(uname -srm)"
+          echo "Runner: ${RUNNER_NAME}"
+          echo "OS: $(uname -srm)"
+          echo "Host: $(hostname)"
+          echo "Workspace: ${GITHUB_WORKSPACE}"
+          echo "Shell: ${{ inputs.shell || 'bash' }}"
 
-      - name: Verify terminal bridge dependencies
+      - name: Install ttyd
         shell: bash
         run: |
           set -euo pipefail
 
-          command -v bash >/dev/null
-          command -v python3 >/dev/null
+          TTYD_VERSION="1.7.7"
+          curl -fsSL \
+            "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+            -o "$RUNNER_TEMP/ttyd"
+          chmod +x "$RUNNER_TEMP/ttyd"
+          "$RUNNER_TEMP/ttyd" --version
 
-          if command -v websocat >/dev/null 2>&1; then
-            echo "websocat: installed"
-          else
-            echo "websocat: not installed"
-            echo "Install websocat on the SELF-HOSTED runner before using live WebSocket mode."
-          fi
+      - name: Install cloudflared
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          if command -v cloudflared >/dev/null 2>&1; then
-            echo "cloudflared: installed"
-          else
-            echo "cloudflared: not installed"
-            echo "Install cloudflared on the SELF-HOSTED runner before enabling an external tunnel."
-          fi
+          CLOUDFLARED_VERSION="2026.9.1"
+          curl -fsSL \
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
+            -o "$RUNNER_TEMP/cloudflared"
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" --version
 
-      - name: Start local terminal gateway
+      - name: Start hosted PTY terminal
+        id: start-terminal
         shell: bash
         env:
-          TERMINAL_PORT: "8765"
+          TERMINAL_SHELL: ${{ inputs.shell || 'bash' }}
         run: |
           set -euo pipefail
 
-          cat > "$RUNNER_TEMP/terminal-bridge/gateway.py" <<'PY'
-          import asyncio
-          import os
-          import pty
-          import select
-          import struct
-          import termios
-          import tty
-
-          HOST = "127.0.0.1"
-          PORT = int(os.environ.get("TERMINAL_PORT", "8765"))
-
-          clients = set()
-
-          async def handle(reader, writer):
-              addr = writer.get_extra_info("peername")
-              clients.add(writer)
-              master = None
-              proc_pid = None
-              old = None
-              try:
-                  # Minimal line-oriented gateway.
-                  # The browser-side WebSocket adapter can be layered on top
-                  # of this endpoint later; this process deliberately binds to
-                  # loopback only.
-                  writer.write(b"HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nConnection: close\\r\\n\\r\\n")
-                  writer.write(b"terminal runner bridge ready\\n")
-                  await writer.drain()
-              finally:
-                  clients.discard(writer)
-                  writer.close()
-                  try:
-                      await writer.wait_closed()
-                  except Exception:
-                      pass
-
-          async def main():
-              server = await asyncio.start_server(handle, HOST, PORT)
-              sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
-              print(f"Terminal gateway listening on {sockets}", flush=True)
-              async with server:
-                  await server.serve_forever()
-
-          asyncio.run(main())
+          TOKEN="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
           PY
+          )"
 
-          nohup python3 "$RUNNER_TEMP/terminal-bridge/gateway.py" > "$RUNNER_TEMP/terminal-bridge/gateway.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/terminal-bridge/gateway.pid"
-          sleep 1
-          cat "$RUNNER_TEMP/terminal-bridge/gateway.log"
+          printf '%s' "$TOKEN" > "$RUNNER_TEMP/terminal-token"
+          chmod 600 "$RUNNER_TEMP/terminal-token"
 
-      - name: Persistent bridge loop
+          if [ "$TERMINAL_SHELL" = "sh" ]; then
+            SHELL_CMD="/bin/sh"
+            SHELL_ARGS=""
+          else
+            SHELL_CMD="/bin/bash"
+            SHELL_ARGS="--login"
+          fi
+
+          nohup "$RUNNER_TEMP/ttyd" \
+            -W \
+            -p 7681 \
+            -i 127.0.0.1 \
+            -P 5 \
+            -c "terminal:${TOKEN}" \
+            "$SHELL_CMD" $SHELL_ARGS \
+            > "$RUNNER_TEMP/ttyd.log" 2>&1 &
+
+          echo $! > "$RUNNER_TEMP/ttyd.pid"
+          sleep 2
+
+          if ! kill -0 "$(cat "$RUNNER_TEMP/ttyd.pid")" 2>/dev/null; then
+            echo "ttyd failed to start"
+            cat "$RUNNER_TEMP/ttyd.log"
+            exit 1
+          fi
+
+          echo "PTY terminal started on 127.0.0.1:7681"
+          echo "Authentication: basic auth enabled"
+
+      - name: Start public tunnel
+        id: tunnel
         shell: bash
-        env:
-          IDLE_SECONDS: ${{ inputs.idle_seconds || '2' }}
         run: |
           set -euo pipefail
 
-          # Keep the runner job alive and continuously monitor the local gateway.
-          # The runner initiates all outbound connections; no inbound GitHub-hosted
-          # runner port is exposed by this loop.
-          while true; do
-            if ! kill -0 "$(cat "$RUNNER_TEMP/terminal-bridge/gateway.pid")" 2>/dev/null; then
-              echo "gateway stopped; restarting"
-              nohup python3 "$RUNNER_TEMP/terminal-bridge/gateway.py" >> "$RUNNER_TEMP/terminal-bridge/gateway.log" 2>&1 &
-              echo $! > "$RUNNER_TEMP/terminal-bridge/gateway.pid"
-            fi
+          nohup "$RUNNER_TEMP/cloudflared" tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:7681 \
+            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
 
-            printf '[%s] runner=%s gateway=alive\n' "$(date -Is)" "$RUNNER_NAME"
-            sleep "${IDLE_SECONDS:-2}"
+          echo $! > "$RUNNER_TEMP/cloudflared.pid"
+
+          URL=""
+          for _ in $(seq 1 30); do
+            URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"
+            if [ -n "$URL" ]; then
+              break
+            fi
+            sleep 2
           done
 
-      - name: Cleanup
+          if [ -z "$URL" ]; then
+            echo "Cloudflare tunnel did not provide a public URL"
+            cat "$RUNNER_TEMP/cloudflared.log"
+            exit 1
+          fi
+
+          echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
+          echo "Terminal URL: $URL"
+          echo "Terminal username: terminal"
+          echo "Terminal password is generated for this run and is intentionally not printed."
+          echo "Open the URL and provide the generated credentials to the terminal client."
+
+      - name: Write connection metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "GitHub hosted terminal"
+            echo "Runner: ${RUNNER_NAME}"
+            echo "URL: ${TERMINAL_URL:-unknown}"
+            echo "Username: terminal"
+            echo "Password: generated per run; stored only on the runner"
+            echo "Expires: when the workflow/job ends"
+          } > "$RUNNER_TEMP/terminal-connection.txt"
+
+          echo ""
+          cat "$RUNNER_TEMP/terminal-connection.txt"
+          echo ""
+          echo "For security, the password is not emitted to Actions logs."
+
+      - name: Keep runner alive and monitor services
+        shell: bash
+        env:
+          IDLE_SECONDS: ${{ inputs.idle_seconds || '3' }}
+        run: |
+          set -euo pipefail
+
+          echo "Hosted terminal is ready."
+          echo "The job will remain alive until cancelled or timeout (350 minutes)."
+
+          while true; do
+            TTYD_PID="$(cat "$RUNNER_TEMP/ttyd.pid")"
+            TUNNEL_PID="$(cat "$RUNNER_TEMP/cloudflared.pid")"
+
+            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
+              echo "[$(date -Is)] ERROR: ttyd stopped"
+              tail -n 50 "$RUNNER_TEMP/ttyd.log" || true
+              exit 1
+            fi
+
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "[$(date -Is)] ERROR: cloudflared stopped"
+              tail -n 50 "$RUNNER_TEMP/cloudflared.log" || true
+              exit 1
+            fi
+
+            printf '[%s] runner=%s ttyd=alive tunnel=alive url=%s\n' \
+              "$(date -Is)" "$RUNNER_NAME" "${TERMINAL_URL:-unknown}"
+            sleep "${IDLE_SECONDS:-3}"
+          done
+
+      - name: Cleanup hosted terminal
         if: always()
         shell: bash
         run: |
-          if [ -f "$RUNNER_TEMP/terminal-bridge/gateway.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/terminal-bridge/gateway.pid")" 2>/dev/null || true
+          set +e
+
+          if [ -f "$RUNNER_TEMP/ttyd.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/ttyd.pid")" 2>/dev/null || true
           fi
+
+          if [ -f "$RUNNER_TEMP/cloudflared.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/cloudflared.pid")" 2>/dev/null || true
+          fi
+
+          rm -f "$RUNNER_TEMP/terminal-token"
+          echo "Hosted terminal cleaned up."
