@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm nodejs npm python python-pip git base-devel sudo curl ca-certificates tar
+          pacman -S --needed --noconfirm nodejs npm python python-pip git base-devel sudo curl ca-certificates tar gnupg
           npm install --no-audit --no-fund --ignore-scripts
 
       - name: Build and install Arch RDP packages
@@ -62,12 +62,13 @@ jobs:
           git clone --depth=1 https://aur.archlinux.org/xorgxrdp.git "$RUNNER_TEMP/aur-xorgxrdp"
           chown -R aurbuilder:aurbuilder "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp"
 
-          # ArchWiki documents that xrdp 0.10.6.1-1 can fail its bundled
-          # bitmap-scaling unit tests because of image-library interpolation.
-          # This is a package check failure, not an xrdp runtime failure.
-          # Skip only the upstream package test phase; integration tests below
-          # still verify xrdp-sesman, Xorg/xorgxrdp, TCP/3389 and the WebSocket tunnel.
+          # xrdp 0.10.6.1-1 has environment-sensitive bitmap-scaling tests.
+          # Skip only the package check phase; integration tests below remain enabled.
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xrdp' && makepkg -si --noconfirm --needed --nocheck"
+
+          # Import the xorgxrdp maintainer key used by the AUR PKGBUILD, then
+          # keep normal detached-signature verification enabled.
+          su - aurbuilder -c "gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys 61ECEABBF2BB40E3A35DF30A9F72CDBC01BF10EB"
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xorgxrdp' && makepkg -si --noconfirm --needed --nocheck"
 
           pacman -S --needed --noconfirm \
