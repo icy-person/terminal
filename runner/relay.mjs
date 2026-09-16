@@ -33,7 +33,16 @@ const server = http.createServer((req, res) => {
   res.end("not found\n");
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false });
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: 1024 * 1024,
+  perMessageDeflate: false,
+  // The browser explicitly requests the ttyd "tty" subprotocol. A WebSocket
+  // server must echo an accepted subprotocol in the 101 response; otherwise
+  // browser WebSocket implementations reject the connection even though a
+  // Node ws client may tolerate the missing response header.
+  handleProtocols: protocols => protocols.has("tty") ? "tty" : false
+});
 
 function authorized(url) {
   const supplied = url.searchParams.get("token") || "";
@@ -61,9 +70,9 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, client => wss.emit("connection", client, req));
 });
 
-wss.on("connection", client => {
+wss.on("connection", (client, req) => {
   metrics.activeClients = wss.clients.size;
-  console.log(`WS_CLIENT_CONNECTED clients=${wss.clients.size}`);
+  console.log(`WS_CLIENT_CONNECTED clients=${wss.clients.size} protocol=${client.protocol || "none"}`);
 
   // ttyd registers its websocket protocol as "tty". Without negotiating it,
   // libwebsockets accepts the TCP upgrade but never dispatches to callback_tty.
