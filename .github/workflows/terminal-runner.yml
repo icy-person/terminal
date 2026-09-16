@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm nodejs npm python curl ca-certificates
+          pacman -S --needed --noconfirm nodejs npm python python-pip curl ca-certificates
           npm install --no-audit --no-fund --ignore-scripts
 
       - name: Install terminal and desktop stack
