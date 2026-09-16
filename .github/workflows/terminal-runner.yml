@@ -171,6 +171,58 @@ jobs:
           echo "============================================================"
           echo ""
 
+      - name: End-to-end WebSocket diagnostic
+        id: websocket-diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "[1/3] Local relay health"
+          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
+
+          echo "[2/3] Public Cloudflare -> relay health"
+          curl -fsS --max-time 15 "${TERMINAL_URL}/healthz" | python3 -m json.tool
+
+          echo "[3/3] Public WebSocket upgrade + ttyd handshake"
+          node <<'NODE'
+          import WebSocket from "ws";
+
+          const url = new URL(process.env.TERMINAL_WS_URL);
+          url.searchParams.set("token", process.env.TERMINAL_TOKEN);
+          const ws = new WebSocket(url, { perMessageDeflate: false });
+          const timeout = setTimeout(() => {
+            console.error("[WS_DIAGNOSTIC_FAIL] timeout waiting for WebSocket/ttyd data");
+            ws.close();
+            process.exit(1);
+          }, 15000);
+
+          ws.once("open", () => {
+            console.log("[WS_UPGRADE_OK] Cloudflare -> relay WebSocket upgrade succeeded");
+            ws.send(JSON.stringify({ columns: 100, rows: 30 }));
+          });
+
+          ws.once("message", (data) => {
+            clearTimeout(timeout);
+            const bytes = Buffer.from(data);
+            console.log(`[PTY_DATA_OK] received ${bytes.length} bytes from ttyd through relay`);
+            console.log(`[PTY_DATA_PREFIX] 0x${bytes[0]?.toString(16).padStart(2, "0")}`);
+            ws.close(1000, "diagnostic complete");
+            process.exit(0);
+          });
+
+          ws.once("unexpected-response", (_request, response) => {
+            clearTimeout(timeout);
+            console.error(`[WS_DIAGNOSTIC_FAIL] HTTP ${response.statusCode} during upgrade`);
+            process.exit(1);
+          });
+
+          ws.once("error", (error) => {
+            clearTimeout(timeout);
+            console.error(`[WS_DIAGNOSTIC_FAIL] ${error.message}`);
+            process.exit(1);
+          });
+          NODE
+
       - name: Write connection summary
         shell: bash
         run: |
@@ -217,12 +269,20 @@ jobs:
               tail -n 50 "$RUNNER_TEMP/cloudflared.log" || true
               exit 1
             fi
-            if ! curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+
+            HEALTH="$(curl -fsS http://127.0.0.1:8090/healthz)" || {
               echo "ERROR: relay health check failed"
               exit 1
-            fi
-
-            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive url=%s\n' "$(date -Is)" "$RUNNER_NAME" "${TERMINAL_URL:-unknown}"
+            }
+            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive clients=%s upgrades=%s authorized=%s rejected=%s c2u=%s u2c=%s url=%s\n' \
+              "$(date -Is)" "$RUNNER_NAME" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["clients"])' <<<"$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["upgrades"])' <<<"$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["authorized"])' <<<"$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["rejected"])' <<<"$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesClientToUpstream"])' <<<"$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesUpstreamToClient"])' <<<"$HEALTH")" \
+              "${TERMINAL_URL:-unknown}"
             sleep "${IDLE_SECONDS:-5}"
           done
 
