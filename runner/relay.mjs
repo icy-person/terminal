@@ -23,6 +23,7 @@ const metrics = {
   messagesUpstreamToClient: 0,
   bytesClientToUpstream: 0,
   bytesUpstreamToClient: 0,
+  queuedClientMessages: 0,
   lastClientMessageAt: null,
   lastUpstreamMessageAt: null,
   lastError: null
@@ -117,10 +118,28 @@ wss.on("connection", (client) => {
 
   let closed = false;
   let upstreamOpened = false;
+  const pending = [];
+
+  const sendUpstream = (data, isBinary) => {
+    if (upstream.readyState !== WebSocket.OPEN) return false;
+    upstream.send(data, { binary: isBinary });
+    return true;
+  };
+
+  const flushPending = () => {
+    while (upstream.readyState === WebSocket.OPEN && pending.length) {
+      const message = pending.shift();
+      sendUpstream(message.data, message.isBinary);
+    }
+    if (pending.length) {
+      metrics.queuedClientMessages = Math.max(metrics.queuedClientMessages, pending.length);
+    }
+  };
 
   const closeBoth = (code = 1000, reason = "") => {
     if (closed) return;
     closed = true;
+    pending.length = 0;
     metrics.activeClients = wss.clients.size;
     if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
       try { client.close(code, reason); } catch {}
@@ -134,6 +153,7 @@ wss.on("connection", (client) => {
     upstreamOpened = true;
     metrics.upstreamOpen++;
     console.log("WS_UPSTREAM_OPEN");
+    flushPending();
   });
 
   upstream.on("message", (data, isBinary) => {
@@ -162,8 +182,11 @@ wss.on("connection", (client) => {
     metrics.bytesClientToUpstream += data.length ?? Buffer.byteLength(String(data));
     metrics.lastClientMessageAt = new Date().toISOString();
     console.log(`WS_CLIENT_MESSAGE bytes=${data.length ?? Buffer.byteLength(String(data))} binary=${isBinary} upstream=${upstreamOpened ? "open" : "connecting"}`);
-    if (upstream.readyState === WebSocket.OPEN) {
-      upstream.send(data, { binary: isBinary });
+
+    if (!sendUpstream(data, isBinary)) {
+      pending.push({ data, isBinary });
+      metrics.queuedClientMessages = pending.length;
+      console.log(`WS_QUEUE_CLIENT_MESSAGE queued=${pending.length}`);
     }
   });
 
