@@ -112,28 +112,36 @@ wss.on("connection", (client) => {
   console.log(`WS_CLIENT_CONNECTED clients=${wss.clients.size}`);
 
   const upstream = new WebSocket(UPSTREAM, {
+    origin: "http://127.0.0.1:7681",
     perMessageDeflate: false,
-    headers: { Origin: "http://127.0.0.1:7681" }
+    handshakeTimeout: 10000
   });
 
   let closed = false;
-  let upstreamOpened = false;
   const pending = [];
 
   const sendUpstream = (data, isBinary) => {
     if (upstream.readyState !== WebSocket.OPEN) return false;
-    upstream.send(data, { binary: isBinary });
-    return true;
+    try {
+      upstream.send(data, { binary: isBinary });
+      return true;
+    } catch (error) {
+      metrics.lastError = String(error?.message || error);
+      console.log(`WS_UPSTREAM_SEND_ERROR ${metrics.lastError}`);
+      return false;
+    }
   };
 
   const flushPending = () => {
     while (upstream.readyState === WebSocket.OPEN && pending.length) {
       const message = pending.shift();
-      sendUpstream(message.data, message.isBinary);
+      if (!sendUpstream(message.data, message.isBinary)) {
+        pending.unshift(message);
+        break;
+      }
     }
-    if (pending.length) {
-      metrics.queuedClientMessages = Math.max(metrics.queuedClientMessages, pending.length);
-    }
+    metrics.queuedClientMessages = Math.max(metrics.queuedClientMessages, pending.length);
+    if (!pending.length) metrics.queuedClientMessages = 0;
   };
 
   const closeBoth = (code = 1000, reason = "") => {
@@ -150,9 +158,8 @@ wss.on("connection", (client) => {
   };
 
   upstream.on("open", () => {
-    upstreamOpened = true;
     metrics.upstreamOpen++;
-    console.log("WS_UPSTREAM_OPEN");
+    console.log(`WS_UPSTREAM_OPEN url=${UPSTREAM}`);
     flushPending();
   });
 
@@ -163,6 +170,14 @@ wss.on("connection", (client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(data, { binary: isBinary });
     }
+  });
+
+  upstream.on("unexpected-response", (_request, response) => {
+    metrics.upstreamErrors++;
+    metrics.lastError = `HTTP ${response.statusCode} from ttyd upstream`;
+    console.log(`WS_UPSTREAM_HTTP_ERROR status=${response.statusCode}`);
+    response.resume();
+    closeBoth(1011, "upstream handshake rejected");
   });
 
   upstream.on("close", (code, reason) => {
@@ -178,10 +193,11 @@ wss.on("connection", (client) => {
   });
 
   client.on("message", (data, isBinary) => {
+    const bytes = data.length ?? Buffer.byteLength(String(data));
     metrics.messagesClientToUpstream++;
-    metrics.bytesClientToUpstream += data.length ?? Buffer.byteLength(String(data));
+    metrics.bytesClientToUpstream += bytes;
     metrics.lastClientMessageAt = new Date().toISOString();
-    console.log(`WS_CLIENT_MESSAGE bytes=${data.length ?? Buffer.byteLength(String(data))} binary=${isBinary} upstream=${upstreamOpened ? "open" : "connecting"}`);
+    console.log(`WS_CLIENT_MESSAGE bytes=${bytes} binary=${isBinary} upstream=${upstream.readyState}`);
 
     if (!sendUpstream(data, isBinary)) {
       pending.push({ data, isBinary });
