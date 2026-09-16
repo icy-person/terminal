@@ -52,13 +52,28 @@ jobs:
             xfce4 \
             xfce4-terminal \
             dbus \
-            dbus-x11 \
             xorg-server-xvfb \
             x11vnc \
-            novnc \
-            websockify \
             xorg-xdpyinfo \
             curl
+
+          NOVNC_VERSION="1.7.0"
+          WEBSOCKIFY_VERSION="0.13.0"
+          NOVNC_DIR="$RUNNER_TEMP/noVNC"
+          WEBSOCKIFY_DIR="$RUNNER_TEMP/websockify"
+
+          rm -rf "$NOVNC_DIR" "$WEBSOCKIFY_DIR"
+          mkdir -p "$NOVNC_DIR" "$WEBSOCKIFY_DIR"
+
+          curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
+            | tar -xz --strip-components=1 -C "$NOVNC_DIR"
+
+          curl -fsSL "https://github.com/novnc/websockify/archive/refs/tags/v${WEBSOCKIFY_VERSION}.tar.gz" \
+            | tar -xz --strip-components=1 -C "$WEBSOCKIFY_DIR"
+
+          python3 -m pip install --break-system-packages --no-cache-dir --no-deps "$WEBSOCKIFY_DIR"
+
+          echo "NOVNC_DIR=$NOVNC_DIR" >> "$GITHUB_ENV"
 
           curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
             -o "$RUNNER_TEMP/ttyd"
@@ -75,6 +90,7 @@ jobs:
           python3 -m websockify --help >/dev/null 2>&1
           command -v websockify >/dev/null
           echo "websockify: $(command -v websockify)"
+          test -f "$NOVNC_DIR/vnc.html"
 
       - name: Show Arch environment
         shell: bash
@@ -120,7 +136,7 @@ jobs:
             >"$RUNNER_TEMP/x11vnc.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/x11vnc.pid"
 
-          nohup websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
+          nohup websockify --web="$NOVNC_DIR" 6080 127.0.0.1:5900 \
             >"$RUNNER_TEMP/websockify.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/websockify.pid"
 
