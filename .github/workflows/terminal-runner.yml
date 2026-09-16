@@ -1,0 +1,162 @@
+name: Terminal Runner Bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Runner bridge mode"
+        required: true
+        default: "terminal"
+        type: choice
+        options:
+          - terminal
+      idle_seconds:
+        description: "Polling interval used by the bridge loop"
+        required: true
+        default: "2"
+        type: string
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/terminal-runner.yml"
+
+# IMPORTANT:
+# Use a SELF-HOSTED runner for a persistent terminal session.
+# GitHub-hosted runners are ephemeral and are not suitable for a permanent
+# browser -> shell connection.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terminal-runner-bridge
+  cancel-in-progress: true
+
+jobs:
+  terminal-runner:
+    name: Persistent terminal bridge
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/terminal-bridge"
+          printf '%s\n' "Starting terminal runner bridge"
+          printf '%s\n' "Runner: $RUNNER_NAME"
+          printf '%s\n' "Host: $(hostname)"
+          printf '%s\n' "OS: $(uname -srm)"
+
+      - name: Verify terminal bridge dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          command -v bash >/dev/null
+          command -v python3 >/dev/null
+
+          if command -v websocat >/dev/null 2>&1; then
+            echo "websocat: installed"
+          else
+            echo "websocat: not installed"
+            echo "Install websocat on the SELF-HOSTED runner before using live WebSocket mode."
+          fi
+
+          if command -v cloudflared >/dev/null 2>&1; then
+            echo "cloudflared: installed"
+          else
+            echo "cloudflared: not installed"
+            echo "Install cloudflared on the SELF-HOSTED runner before enabling an external tunnel."
+          fi
+
+      - name: Start local terminal gateway
+        shell: bash
+        env:
+          TERMINAL_PORT: "8765"
+        run: |
+          set -euo pipefail
+
+          cat > "$RUNNER_TEMP/terminal-bridge/gateway.py" <<'PY'
+          import asyncio
+          import os
+          import pty
+          import select
+          import struct
+          import termios
+          import tty
+
+          HOST = "127.0.0.1"
+          PORT = int(os.environ.get("TERMINAL_PORT", "8765"))
+
+          clients = set()
+
+          async def handle(reader, writer):
+              addr = writer.get_extra_info("peername")
+              clients.add(writer)
+              master = None
+              proc_pid = None
+              old = None
+              try:
+                  # Minimal line-oriented gateway.
+                  # The browser-side WebSocket adapter can be layered on top
+                  # of this endpoint later; this process deliberately binds to
+                  # loopback only.
+                  writer.write(b"HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nConnection: close\\r\\n\\r\\n")
+                  writer.write(b"terminal runner bridge ready\\n")
+                  await writer.drain()
+              finally:
+                  clients.discard(writer)
+                  writer.close()
+                  try:
+                      await writer.wait_closed()
+                  except Exception:
+                      pass
+
+          async def main():
+              server = await asyncio.start_server(handle, HOST, PORT)
+              sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
+              print(f"Terminal gateway listening on {sockets}", flush=True)
+              async with server:
+                  await server.serve_forever()
+
+          asyncio.run(main())
+          PY
+
+          nohup python3 "$RUNNER_TEMP/terminal-bridge/gateway.py" > "$RUNNER_TEMP/terminal-bridge/gateway.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/terminal-bridge/gateway.pid"
+          sleep 1
+          cat "$RUNNER_TEMP/terminal-bridge/gateway.log"
+
+      - name: Persistent bridge loop
+        shell: bash
+        env:
+          IDLE_SECONDS: ${{ inputs.idle_seconds || '2' }}
+        run: |
+          set -euo pipefail
+
+          # Keep the runner job alive and continuously monitor the local gateway.
+          # The runner initiates all outbound connections; no inbound GitHub-hosted
+          # runner port is exposed by this loop.
+          while true; do
+            if ! kill -0 "$(cat "$RUNNER_TEMP/terminal-bridge/gateway.pid")" 2>/dev/null; then
+              echo "gateway stopped; restarting"
+              nohup python3 "$RUNNER_TEMP/terminal-bridge/gateway.py" >> "$RUNNER_TEMP/terminal-bridge/gateway.log" 2>&1 &
+              echo $! > "$RUNNER_TEMP/terminal-bridge/gateway.pid"
+            fi
+
+            printf '[%s] runner=%s gateway=alive\n' "$(date -Is)" "$RUNNER_NAME"
+            sleep "${IDLE_SECONDS:-2}"
+          done
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/terminal-bridge/gateway.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/terminal-bridge/gateway.pid")" 2>/dev/null || true
+          fi
