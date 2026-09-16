@@ -1,0 +1,181 @@
+name: GitHub Hosted Terminal Runner (Fixed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      shell:
+        description: "Shell to run inside the hosted runner"
+        required: true
+        default: "bash"
+        type: choice
+        options: [bash, sh]
+      idle_seconds:
+        description: "Health-check interval"
+        required: true
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-terminal-fixed
+  cancel-in-progress: true
+
+jobs:
+  terminal:
+    name: Hosted terminal + noVNC desktop (Ubuntu, fixed)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node dependencies
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund --ignore-scripts
+
+      - name: Install terminal and desktop stack
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xfce4 xfce4-terminal dbus-x11 xvfb x11vnc novnc websockify curl x11-utils
+
+          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" -o "$RUNNER_TEMP/ttyd"
+          chmod +x "$RUNNER_TEMP/ttyd"
+          "$RUNNER_TEMP/ttyd" --version
+
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64" -o "$RUNNER_TEMP/cloudflared"
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" --version
+
+          Xvfb -help >/dev/null 2>&1 || true
+          x11vnc -version 2>&1 | head -n 1 || true
+          websockify --version
+
+      - name: Start virtual desktop
+        env:
+          DISPLAY: :99
+        run: |
+          set -euo pipefail
+          echo 'DISPLAY=:99' >> "$GITHUB_ENV"
+
+          nohup Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset \
+            >"$RUNNER_TEMP/xvfb.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/xvfb.pid"
+
+          for _ in $(seq 1 30); do
+            xdpyinfo -display :99 >/dev/null 2>&1 && break
+            sleep 1
+          done
+          xdpyinfo -display :99 >/dev/null
+
+          nohup dbus-run-session -- startxfce4 >"$RUNNER_TEMP/xfce.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/xfce.pid"
+          sleep 3
+
+          nohup x11vnc -display :99 -forever -shared -localhost -rfbport 5900 -noxdamage -nopw \
+            >"$RUNNER_TEMP/x11vnc.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/x11vnc.pid"
+
+          nohup websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
+            >"$RUNNER_TEMP/websockify.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/websockify.pid"
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null
+          kill -0 "$(cat "$RUNNER_TEMP/xvfb.pid")"
+          kill -0 "$(cat "$RUNNER_TEMP/x11vnc.pid")"
+          kill -0 "$(cat "$RUNNER_TEMP/websockify.pid")"
+          echo "DESKTOP_LOCAL=http://127.0.0.1:6080/vnc.html"
+
+      - name: Start hosted PTY and relay
+        env:
+          TERMINAL_SHELL: ${{ inputs.shell || 'bash' }}
+        run: |
+          set -euo pipefail
+          TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          export TERMINAL_TOKEN="$TOKEN"
+
+          if [ "$TERMINAL_SHELL" = "sh" ]; then
+            SHELL_CMD=/bin/sh
+            SHELL_ARGS=()
+          else
+            SHELL_CMD=/bin/bash
+            SHELL_ARGS=(--login)
+          fi
+
+          nohup "$RUNNER_TEMP/ttyd" -W -p 7681 -i 127.0.0.1 -P 8 "$SHELL_CMD" "${SHELL_ARGS[@]}" \
+            >"$RUNNER_TEMP/ttyd.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/ttyd.pid"
+
+          export NOVNC_HTTP_URL="http://127.0.0.1:6080"
+          export NOVNC_WS_URL="ws://127.0.0.1:6080/websockify"
+          nohup npm run relay >"$RUNNER_TEMP/relay.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/relay.pid"
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8090/healthz >/dev/null
+          curl -fsS http://127.0.0.1:8090/novnc/vnc.html >/dev/null
+          kill -0 "$(cat "$RUNNER_TEMP/ttyd.pid")"
+          kill -0 "$(cat "$RUNNER_TEMP/relay.pid")"
+
+      - name: Start public Quick Tunnel
+        run: |
+          set -euo pipefail
+          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://127.0.0.1:8090 \
+            >"$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared.pid"
+
+          URL=""
+          for _ in $(seq 1 60); do
+            URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          [ -n "$URL" ] || { cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
+
+          TOKEN_QS="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$TERMINAL_TOKEN")"
+          WS_URL="${URL/https:\/\//wss://}/ws"
+          ENDPOINT_URL="https://icy-person.github.io/terminal/?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$WS_URL")&token=$TOKEN_QS"
+          NOVNC_PATH="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "websockify?token=$TERMINAL_TOKEN")"
+          NOVNC_URL="$URL/novnc/vnc.html?path=$NOVNC_PATH"
+
+          echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
+          echo "TERMINAL_WS_URL=$WS_URL" >> "$GITHUB_ENV"
+          echo "TERMINAL_PAGES_URL=$ENDPOINT_URL" >> "$GITHUB_ENV"
+          echo "NOVNC_URL=$NOVNC_URL" >> "$GITHUB_ENV"
+          echo "HOSTED TERMINAL: $ENDPOINT_URL"
+          echo "HOSTED DESKTOP: $NOVNC_URL"
+
+      - name: End-to-end diagnostics
+        run: |
+          set -euo pipefail
+          echo "[1/4] local relay health"
+          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
+          echo "[2/4] local noVNC"
+          curl -fsSI http://127.0.0.1:8090/novnc/vnc.html
+          echo "[3/4] public health"
+          curl -fsS "$TERMINAL_URL/healthz" | python3 -m json.tool
+          echo "[4/4] public noVNC HTTP"
+          curl -fsSI "$TERMINAL_URL/novnc/vnc.html"
+          echo "Diagnostics passed."
+
+      - name: Keep terminal and desktop alive
+        run: |
+          set -euo pipefail
+          echo "Terminal: $TERMINAL_PAGES_URL"
+          echo "Desktop: $NOVNC_URL"
+          echo "Runner services remain available until cancellation/timeout."
+          while true; do
+            sleep "${{ inputs.idle_seconds || '5' }}"
+          done
