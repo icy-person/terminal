@@ -1,107 +1,29 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#090b0f" />
-    <title>GitHub Terminal</title>
-    <style>
-      html,body,#root{margin:0;width:100%;height:100%;font-family:Inter,Roboto,Arial,sans-serif;background:#090b0f;color:#fff}
-      *{box-sizing:border-box}
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module">
-      import React, { useState } from 'https://esm.sh/react@19.1.1';
-      import { createRoot } from 'https://esm.sh/react-dom@19.1.1/client';
-      import {
-        AppBar, Box, Button, Chip, CssBaseline, Divider, IconButton, List, ListItemButton,
-        ListItemText, Paper, Stack, Tab, Tabs, TextField, ThemeProvider, Toolbar,
-        Tooltip, Typography, createTheme
-      } from 'https://esm.sh/@mui/material@7.3.1?deps=react@19.1.1,react-dom@19.1.1';
-
-      const e = React.createElement;
-      const themeDark = createTheme({
-        palette:{mode:'dark',primary:{main:'#7c4dff'},secondary:{main:'#00bcd4'},background:{default:'#090b0f',paper:'#11151c'}},
-        shape:{borderRadius:12},
-        typography:{fontFamily:'Inter,Roboto,Arial,sans-serif'}
-      });
-
-      const commands = {
-        help:'Available commands: help, ls, pwd, whoami, git status, clear',
-        ls:'Applications  Documents  Downloads  Projects  src  README.md',
-        pwd:'/home/user',
-        whoami:'user',
-        'git status':'On branch main\nYour branch is up to date with origin/main.\n\nnothing to commit, working tree clean'
-      };
-
-      function App(){
-        const [dark,setDark]=useState(true);
-        const [tabs,setTabs]=useState([{id:1,name:'bash'}]);
-        const [active,setActive]=useState(1);
-        const [input,setInput]=useState('');
-        const [lines,setLines]=useState(['GitHub Terminal UI','Type "help" to see available commands.','']);
-        const [history,setHistory]=useState([]);
-
-        const run=()=>{
-          const cmd=input.trim();
-          if(!cmd)return;
-          const out = cmd==='clear' ? null : (commands[cmd] ?? `command not found: ${cmd}`);
-          setHistory(h=>[...h,cmd]);
-          setLines(prev=>cmd==='clear' ? [] : [...prev, `$ ${cmd}`, ...(out?out.split('\n'):[]), '']);
-          setInput('');
-        };
-        const addTab=()=>{const id=Date.now();setTabs(t=>[...t,{id,name:'bash'}]);setActive(id)};
-        const closeTab=(id)=>{if(tabs.length===1)return;const rest=tabs.filter(t=>t.id!==id);setTabs(rest);if(active===id)setActive(rest[0].id)};
-
-        return e(ThemeProvider,{theme:dark?themeDark:createTheme({palette:{mode:'light',primary:{main:'#6750a4'},background:{default:'#f5f5f7',paper:'#fff'}}})},
-          e(CssBaseline),
-          e(Box,{sx:{height:'100%',display:'flex',flexDirection:'column',bgcolor:'background.default'}},
-            e(AppBar,{position:'static',elevation:0,sx:{borderBottom:'1px solid',borderColor:'divider',bgcolor:'background.paper'}},
-              e(Toolbar,{sx:{minHeight:'64px!important',gap:1.5}},
-                e(Typography,{variant:'h6',sx:{fontWeight:800,letterSpacing:-.5}},'◉ terminal'),
-                e(Chip,{label:'Material UI',size:'small',color:'primary',variant:'outlined',sx:{ml:1}}),
-                e(Box,{sx:{flex:1}}),
-                e(Button,{size:'small',onClick:()=>setDark(v=>!v)},dark?'Light':'Dark'),
-                e(Button,{size:'small',variant:'contained',onClick:addTab},'+ New terminal')
-              )
-            ),
-            e(Box,{sx:{display:'flex',flex:1,minHeight:0}},
-              e(Box,{sx:{width:240,borderRight:'1px solid',borderColor:'divider',p:1.5,display:{xs:'none',md:'block'}}},
-                e(Typography,{variant:'overline',sx:{px:1,color:'text.secondary'}},'Workspace'),
-                e(List,{dense:true},['Dashboard','Terminals','History','Files','Repositories','Settings'].map((x,i)=>e(ListItemButton,{key:x,selected:i===1,borderRadius:2},e(ListItemText,{primary:x}))))
-              ),
-              e(Box,{sx:{flex:1,minWidth:0,display:'flex',flexDirection:'column'}},
-                e(Tabs,{value:active,onChange:(_,v)=>setActive(v),variant:'scrollable',scrollButtons:'auto',sx:{minHeight:48,borderBottom:'1px solid',borderColor:'divider'}},
-                  tabs.map(t=>e(Tab,{key:t.id,value:t.id,label:e(Box,{sx:{display:'flex',alignItems:'center',gap:.8}},t.name,e('span',{onClick:(ev)=>{ev.stopPropagation();closeTab(t.id)},style:{opacity:.7,cursor:'pointer'}},'×'))}))
-                ),
-                e(Box,{sx:{p:1.5,borderBottom:'1px solid',borderColor:'divider'}},
-                  e(Stack,{direction:'row',alignItems:'center',spacing:1},
-                    e(Chip,{label:'/home/user',size:'small',variant:'outlined'}),e(Box,{sx:{flex:1}}),
-                    e(Button,{size:'small',onClick:()=>navigator.clipboard?.writeText(lines.join('\n'))},'Copy'),
-                    e(Button,{size:'small',onClick:()=>setLines([])},'Clear')
-                  )
-                ),
-                e(Paper,{square:true,elevation:0,sx:{m:1.5,mb:0,flex:1,minHeight:0,overflow:'auto',p:2.5,bgcolor:'#05070a',color:'#d6e4d8',fontFamily:'ui-monospace,SFMono-Regular,Menlo,monospace',fontSize:14,lineHeight:1.7}},
-                  lines.map((line,i)=>e('div',{key:i,style:{whiteSpace:'pre-wrap'}},line))
-                ),
-                e(Box,{sx:{p:1.5}},
-                  e(Stack,{direction:'row',spacing:1,alignItems:'center'},
-                    e(Typography,{sx:{fontFamily:'monospace',color:'primary.main',fontWeight:700}},'$'),
-                    e(TextField,{fullWidth:true,size:'small',value:input,onChange:ev=>setInput(ev.target.value),onKeyDown:ev=>{if(ev.key==='Enter')run();if(ev.key==='ArrowUp'&&history.length)setInput(history[history.length-1])},placeholder:'Type a command…',autoFocus:true}),
-                    e(Button,{variant:'contained',onClick:run},'Run')
-                  )
-                ),
-                e(Box,{sx:{px:2,py:.75,borderTop:'1px solid',borderColor:'divider',display:'flex',gap:2,color:'text.secondary',fontSize:12}},
-                  e('span',null,'bash'),e('span',null,'UTF-8'),e('span',null,'LF'),e('span',null,'UI mode'),e(Box,{sx:{flex:1}}),e('span',null,'GitHub Pages')
-                )
-              )
-            )
-          )
-        );
-      }
-      createRoot(document.getElementById('root')).render(e(App));
-    </script>
-  </body>
-</html>
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#111318"><title>Terminal — Material Web Shell</title>
+<style>html,body,#root{margin:0;width:100%;height:100%}body{overflow:hidden;font-family:Inter,Roboto,Arial,sans-serif}*{box-sizing:border-box}::selection{background:rgba(124,77,255,.35)}</style>
+</head><body><div id="root"></div><script type="module">
+import React,{useEffect,useMemo,useRef,useState}from'https://esm.sh/react@19.1.1';
+import{createRoot}from'https://esm.sh/react-dom@19.1.1/client';
+import*as M from'https://esm.sh/@mui/material@7.3.1?deps=react@19.1.1,react-dom@19.1.1';
+const e=React.createElement,{Box,Button,Chip,CssBaseline,Dialog,DialogActions,DialogContent,DialogTitle,Divider,Drawer,IconButton,InputAdornment,List,ListItemButton,ListItemIcon,ListItemText,Paper,Stack,Switch,TextField,ThemeProvider,Toolbar,Tooltip,Typography,Tabs,Tab,AppBar,InputBase,createTheme}=M;
+const nav=['Dashboard','Terminals','History','Files','Repositories','Applications','Settings'];
+const files=['Documents/','Downloads/','Projects/','src/','README.md','package.json','.bashrc','.config/'];
+const content={'README.md':'# Terminal\nMaterial UI web terminal\n\nGitHub Pages friendly browser shell.','package.json':'{\n  "name":"github-terminal-ui",\n  "type":"module"\n}','todo.txt':'- xterm.js adapter\n- WebSocket backend\n- GitHub integration','notes.md':'Terminal workspace notes','src/main.jsx':'// React entrypoint','src/styles.css':'/* terminal styles */'};
+const help=`Core commands:\n  help          show commands\n  clear         clear terminal\n  ls            list files\n  pwd           print path\n  cd <dir>      change directory\n  cat <file>    print a file\n  echo <text>   print text\n  history       command history\n  whoami        current user\n  uname -a      system info\n  date          current date\n  git status    repository status\n  git branch    branches\n  npm run build simulated build\n  neofetch      system summary\n  exit          close terminal`;
+function tab(id,name='bash'){return{id,name,cwd:'/home/user',history:[],hi:-1,input:'',lines:['╭────────────────────────────────────────────────────╮','│  TERMINAL · Material Web Shell                     │','│  Browser UI · GitHub Pages · UI mode               │','╰────────────────────────────────────────────────────╯','Type "help" for commands.','']}}
+function App(){
+const[dark,setDark]=useState(()=>localStorage.getItem('ttheme')!=='light'),[section,setSection]=useState('Terminals'),[mobile,setMobile]=useState(false),[tabs,setTabs]=useState(()=>[tab(1)]),[active,setActive]=useState(1),[split,setSplit]=useState(false),[palette,setPalette]=useState(false),[settings,setSettings]=useState(false),[search,setSearch]=useState(''),[font,setFont]=useState(()=>+(localStorage.getItem('tfont')||14)),[wrap,setWrap]=useState(true),[q,setQ]=useState('');
+const refs=useRef({}),at=tabs.find(x=>x.id===active)||tabs[0],theme=useMemo(()=>createTheme({palette:{mode:dark?'dark':'light',primary:{main:dark?'#b39ddb':'#6750a4'},secondary:{main:'#00bcd4'},background:{default:dark?'#0c0e12':'#f5f6f8',paper:dark?'#11141a':'#fff'}},shape:{borderRadius:14},typography:{fontFamily:'Inter,Roboto,Arial,sans-serif',button:{textTransform:'none',fontWeight:700}}}),[dark]);
+useEffect(()=>{localStorage.setItem('ttheme',dark?'dark':'light');localStorage.setItem('tfont',font)},[dark,font]);
+useEffect(()=>{const f=x=>{if((x.ctrlKey||x.metaKey)&&x.shiftKey&&x.key.toLowerCase()==='p'){x.preventDefault();setPalette(1)}if((x.ctrlKey||x.metaKey)&&x.shiftKey&&x.key.toLowerCase()==='t'){x.preventDefault();newTab()}if((x.ctrlKey||x.metaKey)&&x.shiftKey&&x.key.toLowerCase()==='s'){x.preventDefault();setSplit(v=>!v)}if((x.ctrlKey||x.metaKey)&&x.key.toLowerCase()==='l'){x.preventDefault();clear(active)}if(x.key==='Escape'){setPalette(0);setSettings(0)}};addEventListener('keydown',f);return()=>removeEventListener('keydown',f)},[active]);
+function patch(id,fn){setTabs(v=>v.map(t=>t.id===id?fn({...t}):t))} function newTab(){const id=Date.now();setTabs(v=>[...v,tab(id)]);setActive(id);setTimeout(()=>refs.current[id]?.focus(),30)} function closeTab(id){setTabs(v=>{if(v.length===1)return v;const r=v.filter(t=>t.id!==id);if(active===id)setActive(r[r.length-1].id);return r})} function clear(id){patch(id,t=>({...t,lines:[]}))}
+function run(id,s){const c=s.trim();if(!c)return;const t=tabs.find(x=>x.id===id);if(!t)return;if(c==='clear'){patch(id,x=>({...x,history:[...x.history,c],hi:-1,input:'',lines:[]}));return}let out=[];let cwd=t.cwd;
+if(c==='help')out=help.split('\n');else if(c==='ls')out=files;else if(c==='pwd')out=[cwd];else if(c==='whoami')out=['user'];else if(c==='date')out=[new Date().toString()];else if(c==='history')out=t.history.map((x,i)=>`${i+1}  ${x}`);else if(c==='uname -a')out=['Linux web-terminal 6.x x86_64 GNU/Linux'];else if(c==='git status')out=['On branch main','Your branch is up to date with origin/main.','','nothing to commit, working tree clean'];else if(c==='git branch')out=['* main','  lm-studio-support','  feature/ui-v2'];else if(c==='npm run build')out=['> vite build','✓ bundle ready','dist/ generated successfully (simulated)'];else if(c==='neofetch')out=['       ██████████  user@web-terminal','       ███████████ OS: Browser UI','       ███████████ Shell: bash','       ███████████ Theme: Material'];else if(c.startsWith('echo '))out=[c.slice(5)];else if(c.startsWith('cat ')){const k=c.slice(4).trim();out=[content[k]??`cat: ${k}: No such file`]};else if(c.startsWith('cd ')){const k=c.slice(3).trim();cwd=k==='..'?'/home':k==='~'?'/home/user':k.startsWith('/')?k:`/home/user/${k}`}else if(c==='exit'){closeTab(id);return}else out=[`${c.split(/\s+/)[0]}: command not found (browser UI mode)`,'Type "help" for available commands.'];patch(id,x=>({...x,cwd,history:[...x.history,c],hi:-1,input:'',lines:[...x.lines,`${x.cwd} $ ${c}`,...out,'']}))}
+function key(id,x){const t=tabs.find(z=>z.id===id);if(x.key==='Enter'){x.preventDefault();run(id,t.input)}else if(x.key==='ArrowUp'){x.preventDefault();const i=t.hi<0?t.history.length-1:Math.max(0,t.hi-1);patch(id,z=>({...z,input:z.history[i]||'',hi:i}))}else if(x.key==='ArrowDown'){x.preventDefault();const i=Math.min(t.history.length,t.hi+1);patch(id,z=>({...z,input:z.history[i]||'',hi:i>=z.history.length?-1:i}))}}
+function Pane({t}){return e(Paper,{elevation:0,sx:{m:1,mt:0,flex:1,minHeight:0,bgcolor:'#07090d',color:'#e8edf2',display:'flex',flexDirection:'column',border:'1px solid rgba(255,255,255,.08)',borderRadius:3,overflow:'hidden'}},e(Box,{sx:{px:1.5,py:.8,borderBottom:'1px solid rgba(255,255,255,.08)',display:'flex',alignItems:'center',gap:1}},e(Typography,{variant:'caption',color:'#9aa5b1',fontFamily:'monospace'},t.cwd),e(Box,{flex:1}),e(Chip,{size:'small',label:'bash',variant:'outlined',sx:{color:'#b8c1cc'}})),e(Box,{sx:{flex:1,minHeight:0,overflow:'auto',p:2,fontFamily:'ui-monospace,SFMono-Regular,Menlo,monospace',fontSize:font,lineHeight:1.65,whiteSpace:wrap?'pre-wrap':'pre'}},t.lines.map((l,i)=>e(Box,{key:i,sx:{color:l.includes('command not found')?'#ff8a80':l.startsWith('Type "help')?'#80cbc4':'#dce3ea'}},l))),e(Box,{sx:{px:1.5,py:1,borderTop:'1px solid rgba(255,255,255,.08)',display:'flex',alignItems:'center',gap:1}},e(Typography,{sx:{fontFamily:'monospace',color:'#b39ddb',fontWeight:800}},'❯'),e(InputBase,{inputRef:r=>refs.current[t.id]=r,fullWidth:true,value:t.input,onChange:x=>patch(t.id,z=>({...z,input:x.target.value})),onKeyDown:x=>key(t.id,x),placeholder:'type a command…',sx:{fontFamily:'monospace',color:'#fff',fontSize:font}}))) }
+function Side(){return e(Box,{sx:{width:248,flexShrink:0,borderRight:'1px solid',borderColor:'divider',bgcolor:'background.paper',display:{xs:'none',md:'flex'},flexDirection:'column'}},e(Box,{sx:{p:2}},e(Stack,{direction:'row',spacing:1,alignItems:'center'},e(Box,{sx:{width:34,height:34,borderRadius:2.5,display:'grid',placeItems:'center',bgcolor:'primary.main',color:'#fff',fontWeight:900}},'>_'),e(Box,null,e(Typography,{fontWeight:800},'terminal'),e(Typography,{variant:'caption',color:'text.secondary'},'Material Web Shell')))),e(Divider),e(Box,{sx:{p:1.2}},e(TextField,{size:'small',fullWidth:true,placeholder:'Search',value:search,onChange:x=>setSearch(x.target.value),InputProps:{startAdornment:e(InputAdornment,{position:'start'},'⌕')}})),e(List,{dense:true,sx:{px:1}},nav.map((n,i)=>e(ListItemButton,{key:n,selected:section===n,onClick:()=>setSection(n),sx:{borderRadius:2,mb:.3}},e(ListItemIcon,{sx:{minWidth:34,color:'inherit'}},['⌂','>_','◷','□','⑂','▦','⚙'][i]),e(ListItemText,{primary:n})))),e(Box,{flex:1}),e(Box,{p:1.5},e(Paper,{variant:'outlined',sx:{p:1.3}},e(Typography,{variant:'caption',color:'text.secondary'},'STATIC MODE'),e(Typography,{fontWeight:700},'GitHub Pages'),e(Typography,{variant:'caption',color:'text.secondary'},'Browser-only shell'))))) }
+return e(ThemeProvider,{theme},e(CssBaseline),e(Box,{sx:{height:'100%',display:'flex',bgcolor:'background.default'}},e(Side),e(Drawer,{open:mobile,onClose:()=>setMobile(false)},e(Box,{sx:{width:248,p:1}},e(Typography,{fontWeight:800,p:2},'terminal'),nav.map(n=>e(ListItemButton,{key:n,selected:section===n,onClick:()=>{setSection(n);setMobile(false)}},e(ListItemText,{primary:n}))))),e(Box,{flex:1,minWidth:0,display:'flex',flexDirection:'column'},e(AppBar,{position:'static',elevation:0,sx:{bgcolor:'background.paper',color:'text.primary',borderBottom:'1px solid',borderColor:'divider'}},e(Toolbar,{sx:{minHeight:'58px!important',gap:1}},e(IconButton,{sx:{display:{md:'none'}},onClick:()=>setMobile(true)},'☰'),e(Typography,{fontWeight:800},section),e(Chip,{label:'UI MODE',size:'small',color:'primary',variant:'outlined'}),e(Box,{flex:1}),e(Tooltip,{title:'Command palette'},e(IconButton,{onClick:()=>setPalette(1)},'⌘')),e(Tooltip,{title:'Settings'},e(IconButton,{onClick:()=>setSettings(1)},'⚙')),e(Button,{size:'small',onClick:()=>setDark(v=>!v)},dark?'Light':'Dark'),e(Button,{size:'small',variant:'contained',onClick:newTab},'+ New'))),e(Tabs,{value:active,onChange:(_,v)=>setActive(v),variant:'scrollable',sx:{minHeight:48,borderBottom:'1px solid',borderColor:'divider',bgcolor:'background.paper'}},tabs.map(t=>e(Tab,{key:t.id,value:t.id,label:e(Box,{sx:{display:'flex',gap:.7,alignItems:'center'}},t.name,e('span',{style:{opacity:.6},onClick:x=>{x.stopPropagation();closeTab(t.id)}},'×'))}))),e(Box,{sx:{px:1.2,py:.6,display:'flex',gap:.7,borderBottom:'1px solid',borderColor:'divider'}},e(Chip,{size:'small',label:at.cwd,variant:'outlined',sx:{fontFamily:'monospace'}}),e(Box,{flex:1}),e(Button,{size:'small',onClick:()=>setSplit(v=>!v)},split?'Single':'Split'),e(Button,{size:'small',onClick:()=>clear(active)},'Clear'),e(Button,{size:'small',onClick:()=>navigator.clipboard?.writeText(at.lines.join('\n'))},'Copy')),e(Box,{sx:{flex:1,minHeight:0,display:'flex',flexDirection:{xs:'column',lg:'row'}}},e(Pane,{t:at}),split&&tabs.length>1?e(Pane,{t:tabs.find(x=>x.id!==active)||tabs[0]}):null),e(Box,{sx:{px:1.5,py:.65,borderTop:'1px solid',borderColor:'divider',display:'flex',gap:2,color:'text.secondary',fontSize:11.5}},e('span',null,'bash'),e('span',null,'UTF-8'),e('span',null,'LF'),e('span',null,`${tabs.length} terminals`),e(Box,{flex:1}),e('span',null,'Ctrl+Shift+P'))),e(Dialog,{open:palette,onClose:()=>setPalette(false),fullWidth:true,maxWidth:'sm'},e(DialogTitle,null,'Command Palette'),e(DialogContent,null,e(TextField,{autoFocus:true,fullWidth:true,placeholder:'Search commands…',value:q,onChange:x=>setQ(x.target.value),sx:{mb:1}}),[['New terminal','Create a terminal tab'],['Split','Toggle split view'],['Clear terminal','Clear current pane'],['Settings','Open settings'],['Dark mode','Toggle appearance']].filter(x=>x[0].toLowerCase().includes(q.toLowerCase())).map(([a,b])=>e(ListItemButton,{key:a,onClick:()=>{setPalette(false);if(a==='New terminal')newTab();if(a==='Split')setSplit(v=>!v);if(a==='Clear terminal')clear(active);if(a==='Settings')setSettings(true);if(a==='Dark mode')setDark(v=>!v)}},e(ListItemText,{primary:a,secondary:b}))))),e(Dialog,{open:settings,onClose:()=>setSettings(false),fullWidth:true,maxWidth:'sm'},e(DialogTitle,null,'Terminal Settings'),e(DialogContent,null,e(Stack,{spacing:2},e(Stack,{direction:'row',justifyContent:'space-between',alignItems:'center'},e(Box,null,e(Typography,{fontWeight:700},'Dark mode'),e(Typography,{variant:'body2',color:'text.secondary'},'Persisted locally')),e(Switch,{checked:dark,onChange:x=>setDark(x.target.checked)})),e(Box,null,e(Typography,{fontWeight:700},`Font size: ${font}px`),e(TextField,{type:'range',fullWidth:true,value:font,onChange:x=>setFont(+x.target.value),inputProps:{min:11,max:20}})),e(Stack,{direction:'row',justifyContent:'space-between',alignItems:'center'},e(Typography,{fontWeight:700},'Word wrap'),e(Switch,{checked:wrap,onChange:x=>setWrap(x.target.checked)})),e(Typography,{variant:'caption',color:'text.secondary'},'Shortcuts: Ctrl+Shift+P palette · Ctrl+Shift+T new tab · Ctrl+Shift+S split · Ctrl+L clear'))),e(DialogActions,null,e(Button,{variant:'contained',onClick:()=>setSettings(false)},'Done')))) }
+createRoot(document.getElementById('root')).render(e(App));
+</script></body></html>
