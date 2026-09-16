@@ -126,12 +126,12 @@ jobs:
 
           if ! kill -0 "$(cat "$RUNNER_TEMP/ttyd.pid")" 2>/dev/null; then
             echo "ttyd failed to start"
-            cat "$RUNNER_TEMP/ttyd.log"
+            cat "$RUNNER_TEMP/ttyd.log" || true
             exit 1
           fi
           if ! kill -0 "$(cat "$RUNNER_TEMP/relay.pid")" 2>/dev/null; then
             echo "relay failed to start"
-            cat "$RUNNER_TEMP/relay.log"
+            cat "$RUNNER_TEMP/relay.log" || true
             exit 1
           fi
 
@@ -160,7 +160,7 @@ jobs:
 
           if [ -z "$URL" ]; then
             echo "Cloudflare tunnel did not provide a public URL"
-            cat "$RUNNER_TEMP/cloudflared.log"
+            cat "$RUNNER_TEMP/cloudflared.log" || true
             exit 1
           fi
 
@@ -203,7 +203,6 @@ jobs:
 
           if [ "$DNS_OK" -ne 1 ]; then
             echo "[DNS_FAIL] Quick Tunnel hostname was not published after 5 minutes"
-            echo "--- cloudflared log ---"
             tail -n 100 "$RUNNER_TEMP/cloudflared.log" || true
             exit 1
           fi
@@ -229,12 +228,96 @@ jobs:
         id: websocket-diagnostic
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          echo "[1/4] Local relay health"
-          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
+          dump_state() {
+            echo ""
+            echo "================ DIAGNOSTIC STATE ================"
+            echo "--- relay health ---"
+            curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool || true
+            echo "--- ttyd log ---"
+            tail -n 100 "$RUNNER_TEMP/ttyd.log" || true
+            echo "--- relay log ---"
+            tail -n 150 "$RUNNER_TEMP/relay.log" || true
+            echo "--- cloudflared log ---"
+            tail -n 80 "$RUNNER_TEMP/cloudflared.log" || true
+            echo "=================================================="
+          }
+          trap dump_state EXIT
 
-          echo "[2/4] Public DNS + Cloudflare -> relay health"
+          TEST_STATUS=0
+
+          echo "[1/5] Local relay health"
+          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool || TEST_STATUS=1
+
+          echo "[2/5] Direct local ttyd WebSocket + protocol handshake"
+          set +e
+          node <<'NODE'
+          import WebSocket from "ws";
+
+          const target = "ws://127.0.0.1:7681/ws";
+          const deadline = Date.now() + 15000;
+          let done = false;
+
+          function fail(message) {
+            if (done) return;
+            done = true;
+            console.error(`[LOCAL_WS_FAIL] ${message}`);
+            process.exitCode = 1;
+          }
+
+          const ws = new WebSocket(target, {
+            origin: "http://127.0.0.1:7681",
+            perMessageDeflate: false,
+            handshakeTimeout: 8000
+          });
+
+          const timer = setTimeout(() => {
+            try { ws.terminate(); } catch {}
+            fail("timed out waiting for ttyd");
+          }, 12000);
+
+          ws.once("open", () => {
+            console.log("[LOCAL_WS_OPEN] direct runner -> ttyd upgrade succeeded");
+            ws.send(JSON.stringify({ columns: 100, rows: 30 }));
+          });
+
+          ws.on("message", (data) => {
+            if (done) return;
+            clearTimeout(timer);
+            const bytes = Buffer.from(data);
+            console.log(`[LOCAL_PTY_DATA_OK] received ${bytes.length} bytes prefix=0x${bytes[0]?.toString(16).padStart(2, "0")}`);
+            if (![0x30, 0x31, 0x32, 0x7b].includes(bytes[0])) {
+              fail(`unexpected ttyd message prefix 0x${bytes[0]?.toString(16)}`);
+              return;
+            }
+            done = true;
+            ws.close(1000, "local diagnostic complete");
+            process.exitCode = 0;
+          });
+
+          ws.once("unexpected-response", (_req, response) => {
+            clearTimeout(timer);
+            fail(`ttyd returned HTTP ${response.statusCode}`);
+            response.resume();
+          });
+
+          ws.once("error", (error) => {
+            clearTimeout(timer);
+            fail(error?.message || String(error));
+          });
+          NODE
+          LOCAL_STATUS=$?
+          set -e
+
+          if [ "$LOCAL_STATUS" -ne 0 ]; then
+            echo "[LOCAL_TTYD_FAIL] Direct ttyd WebSocket is broken; public tunnel is not the cause."
+            TEST_STATUS=1
+          else
+            echo "[LOCAL_TTYD_OK] Direct ttyd WebSocket and PTY protocol are working."
+          fi
+
+          echo "[3/5] Public DNS + Cloudflare -> relay health"
           PUBLIC_HEALTH_OK=0
           PUBLIC_HEALTH_MODE="system-dns"
           for attempt in $(seq 1 60); do
@@ -254,24 +337,18 @@ jobs:
               PUBLIC_HEALTH_MODE="cloudflare-doh"
               break
             fi
-
-            cat "$RUNNER_TEMP/public-health.err" 2>/dev/null || true
             sleep 2
           done
 
           if [ "$PUBLIC_HEALTH_OK" -ne 1 ]; then
             echo "[PUBLIC_HEALTH_FAIL] Cloudflare hostname did not become reachable"
-            echo "--- normal DNS error ---"
-            cat "$RUNNER_TEMP/public-health.err" 2>/dev/null || true
-            echo "--- DoH error ---"
-            cat "$RUNNER_TEMP/public-health-doh.err" 2>/dev/null || true
-            echo "--- cloudflared log ---"
-            tail -n 100 "$RUNNER_TEMP/cloudflared.log" || true
-            exit 1
+            TEST_STATUS=1
+          else
+            echo "[PUBLIC_HEALTH_OK] mode=${PUBLIC_HEALTH_MODE}"
           fi
-          echo "[PUBLIC_HEALTH_OK] mode=${PUBLIC_HEALTH_MODE}"
 
-          echo "[3/4] Public WebSocket upgrade + ttyd protocol handshake"
+          echo "[4/5] Public WebSocket upgrade + ttyd protocol handshake"
+          set +e
           node <<'NODE'
           import WebSocket from "ws";
 
@@ -279,17 +356,27 @@ jobs:
           target.searchParams.set("token", process.env.TERMINAL_TOKEN);
           const deadline = Date.now() + 60000;
           let attempt = 0;
+          let success = false;
+
+          function finish(code) {
+            if (success || code === 0) success = code === 0;
+            process.exitCode = code;
+          }
 
           function connect() {
             attempt += 1;
             const remaining = deadline - Date.now();
             if (remaining <= 0) {
-              console.error("[WS_DIAGNOSTIC_FAIL] timed out waiting for public WebSocket");
-              process.exit(1);
+              console.error("[WS_DIAGNOSTIC_FAIL] timed out waiting for public WebSocket/PTY data");
+              finish(1);
+              return;
             }
 
             console.log(`[WS_ATTEMPT] ${attempt}`);
-            const ws = new WebSocket(target, { perMessageDeflate: false });
+            const ws = new WebSocket(target, {
+              perMessageDeflate: false,
+              handshakeTimeout: 10000
+            });
             let finished = false;
             const timer = setTimeout(() => {
               if (finished) return;
@@ -302,7 +389,6 @@ jobs:
             ws.once("open", () => {
               if (finished) return;
               console.log("[WS_UPGRADE_OK] Cloudflare -> relay WebSocket upgrade succeeded");
-              // ttyd's initial client message is raw JSON. The relay must preserve it byte-for-byte.
               ws.send(JSON.stringify({ columns: 100, rows: 30 }));
             });
 
@@ -313,12 +399,14 @@ jobs:
               const bytes = Buffer.from(data);
               console.log(`[PTY_DATA_OK] received ${bytes.length} bytes from ttyd through relay`);
               console.log(`[PTY_DATA_PREFIX] 0x${bytes[0]?.toString(16).padStart(2, "0")}`);
-              if (bytes[0] !== 0x30 && bytes[0] !== 0x31 && bytes[0] !== 0x32 && bytes[0] !== 0x7b) {
+              if (![0x30, 0x31, 0x32, 0x7b].includes(bytes[0])) {
                 console.error("[PTY_PROTOCOL_FAIL] unexpected ttyd message prefix");
-                process.exit(1);
+                try { ws.terminate(); } catch {}
+                finish(1);
+                return;
               }
-              ws.close(1000, "diagnostic complete");
-              process.exit(0);
+              try { ws.close(1000, "diagnostic complete"); } catch {}
+              finish(0);
             });
 
             ws.once("unexpected-response", (_request, response) => {
@@ -326,6 +414,7 @@ jobs:
               finished = true;
               clearTimeout(timer);
               console.log(`[WS_HTTP_RESPONSE] HTTP ${response.statusCode}; retrying`);
+              try { response.resume(); } catch {}
               try { ws.terminate(); } catch {}
               setTimeout(connect, 1000);
             });
@@ -341,13 +430,20 @@ jobs:
 
           connect();
           NODE
+          PUBLIC_WS_STATUS=$?
+          set -e
 
-          echo "[4/4] Relay/PTY state after WebSocket diagnostic"
-          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
-          echo "--- ttyd log ---"
-          tail -n 50 "$RUNNER_TEMP/ttyd.log" || true
-          echo "--- relay log ---"
-          tail -n 100 "$RUNNER_TEMP/relay.log" || true
+          if [ "$PUBLIC_WS_STATUS" -ne 0 ]; then
+            echo "[PUBLIC_WS_FAIL] Public WebSocket did not complete the ttyd protocol handshake."
+            TEST_STATUS=1
+          else
+            echo "[PUBLIC_WS_OK] Public WebSocket reached ttyd and returned PTY data."
+          fi
+
+          echo "[5/5] Final service state"
+          curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool || TEST_STATUS=1
+
+          exit "$TEST_STATUS"
 
       - name: Write connection summary
         shell: bash
@@ -382,17 +478,17 @@ jobs:
 
             if ! kill -0 "$TTYD_PID" 2>/dev/null; then
               echo "ERROR: ttyd stopped"
-              tail -n 50 "$RUNNER_TEMP/ttyd.log" || true
+              tail -n 100 "$RUNNER_TEMP/ttyd.log" || true
               exit 1
             fi
             if ! kill -0 "$RELAY_PID" 2>/dev/null; then
               echo "ERROR: relay stopped"
-              tail -n 50 "$RUNNER_TEMP/relay.log" || true
+              tail -n 100 "$RUNNER_TEMP/relay.log" || true
               exit 1
             fi
             if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
               echo "ERROR: cloudflared stopped"
-              tail -n 50 "$RUNNER_TEMP/cloudflared.log" || true
+              tail -n 100 "$RUNNER_TEMP/cloudflared.log" || true
               exit 1
             fi
 
@@ -400,28 +496,18 @@ jobs:
               echo "ERROR: relay health check failed"
               exit 1
             }
-            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive clients=%s upgrades=%s authorized=%s rejected=%s c2u=%s u2c=%s queued=%s url=%s\n' \
-              "$(date -Is)" "$RUNNER_NAME" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["clients"])' <<<"$HEALTH")" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["upgrades"])' <<<"$HEALTH")" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["authorized"])' <<<"$HEALTH")" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["rejected"])' <<<"$HEALTH")" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesClientToUpstream"])' <<<"$HEALTH")" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesUpstreamToClient"])' <<<"$HEALTH")" \
-              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["queuedClientMessages"])' <<<"$HEALTH")" \
-              "${TERMINAL_URL:-unknown}"
-            sleep "${IDLE_SECONDS:-5}"
-          done
+            printf '[%s] runner=%s ttyd=alive relay=alive tunnel=alive clients=%s upgrades=%s authorized=%s rejected=%s upstream_open=%s upstream_errors=%s c2u=%s u2c=%s queued=%s\n' \
+              "$(date -u +%FT%TZ)" \
+              "$RUNNER_NAME" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["activeClients"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["upgrades"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["authorized"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["rejected"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["upstreamOpen"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["upstreamErrors"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesClientToUpstream"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["messagesUpstreamToClient"])' <<< "$HEALTH")" \
+              "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["metrics"]["queuedClientMessages"])' <<< "$HEALTH")"
 
-      - name: Cleanup hosted terminal
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          for file in ttyd.pid relay.pid cloudflared.pid; do
-            if [ -f "$RUNNER_TEMP/$file" ]; then
-              kill "$(cat "$RUNNER_TEMP/$file")" 2>/dev/null || true
-            fi
+            sleep "$IDLE_SECONDS"
           done
-          rm -f "$RUNNER_TEMP/terminal-token"
-          echo "Hosted terminal cleaned up."
