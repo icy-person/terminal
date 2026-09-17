@@ -3,11 +3,9 @@ import asyncio
 import json
 import logging
 import os
-import signal
-from fractions import Fraction
 
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
 from aiortc.contrib.media import MediaPlayer
 
 logging.basicConfig(level=os.getenv("WEBRTC_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -26,7 +24,10 @@ TURN_URL = os.getenv("WEBRTC_TURN_URL", "")
 TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "")
 TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 
-pcs: set[RTCPeerConnection] = set()
+if not TOKEN:
+    raise SystemExit("TERMINAL_TOKEN is required")
+
+pcs = set()
 
 
 def ice_servers():
@@ -36,17 +37,15 @@ def ice_servers():
     return servers
 
 
-def ice_complete(pc: RTCPeerConnection):
-    async def wait():
-        for _ in range(200):
-            if pc.iceGatheringState == "complete":
-                return
-            await asyncio.sleep(0.025)
-    return wait()
+async def wait_ice_complete(pc):
+    for _ in range(240):
+        if pc.iceGatheringState == "complete":
+            return
+        await asyncio.sleep(0.025)
 
 
 def make_video_player():
-    options = {
+    return MediaPlayer(DISPLAY, format="x11grab", options={
         "video_size": f"{WIDTH}x{HEIGHT}",
         "framerate": str(FPS),
         "draw_mouse": "0",
@@ -54,102 +53,97 @@ def make_video_player():
         "flags": "low_delay",
         "probesize": "32",
         "analyzeduration": "0",
-    }
-    # X11 capture is provided by FFmpeg through PyAV/MediaPlayer.
-    return MediaPlayer(DISPLAY, format="x11grab", options=options, decode=True)
+    }, decode=True)
 
 
 def make_audio_player():
     pulse = os.getenv("PULSE_SERVER", "")
-    options = {
+    return MediaPlayer(pulse or "default", format="pulse", options={
         "sample_rate": "48000",
         "channels": "2",
         "fflags": "nobuffer",
         "probesize": "32",
         "analyzeduration": "0",
-    }
-    source = "default"
-    if pulse:
-        source = pulse
-    return MediaPlayer(source, format="pulse", options=options, decode=True)
+    }, decode=True)
 
 
 class InputBridge:
-    """Low-latency XTest mouse/keyboard injection for the XFCE X server."""
+    """Inject browser keyboard/mouse events into the X11 desktop with XTest."""
     def __init__(self):
         self.display = None
         self.xtest = None
-        self.root = None
+        self.X = None
         try:
-            from Xlib import X, display as xdisplay
+            from Xlib import X, XK, display as xdisplay
             from Xlib.ext import xtest
             self.X = X
-            self.display = xdisplay.Display(os.getenv("DISPLAY", DISPLAY))
+            self.XK = XK
+            self.display = xdisplay.Display(DISPLAY)
             self.xtest = xtest
-            self.root = self.display.screen().root
-            self.width = self.display.screen().width_in_pixels
-            self.height = self.display.screen().height_in_pixels
-            log.info("XTest input bridge ready on %s (%sx%s)", os.getenv("DISPLAY", DISPLAY), self.width, self.height)
+            screen = self.display.screen()
+            self.width = screen.width_in_pixels
+            self.height = screen.height_in_pixels
+            log.info("XTest input bridge ready: %s %sx%s", DISPLAY, self.width, self.height)
         except Exception as exc:
             log.warning("XTest input bridge unavailable: %s", exc)
 
-    def _keycode(self, code: str, key: str = ""):
+    def _keycode(self, code, key):
         if not self.display:
             return 0
-        from Xlib import XK
         names = {
-            "Escape": "Escape", "Enter": "Return", "Tab": "Tab", "Backspace": "BackSpace",
-            "Delete": "Delete", "Insert": "Insert", "Home": "Home", "End": "End",
-            "PageUp": "Prior", "PageDown": "Next", "ArrowUp": "Up", "ArrowDown": "Down",
-            "ArrowLeft": "Left", "ArrowRight": "Right", "Space": "space",
-            "ShiftLeft": "Shift_L", "ShiftRight": "Shift_R", "ControlLeft": "Control_L",
-            "ControlRight": "Control_R", "AltLeft": "Alt_L", "AltRight": "Alt_R",
-            "MetaLeft": "Super_L", "MetaRight": "Super_R", "CapsLock": "Caps_Lock",
-            "F1": "F1", "F2": "F2", "F3": "F3", "F4": "F4", "F5": "F5", "F6": "F6",
-            "F7": "F7", "F8": "F8", "F9": "F9", "F10": "F10", "F11": "F11", "F12": "F12",
+            "Escape":"Escape", "Enter":"Return", "Tab":"Tab", "Backspace":"BackSpace",
+            "Delete":"Delete", "Insert":"Insert", "Home":"Home", "End":"End",
+            "PageUp":"Prior", "PageDown":"Next", "ArrowUp":"Up", "ArrowDown":"Down",
+            "ArrowLeft":"Left", "ArrowRight":"Right", "Space":"space",
+            "ShiftLeft":"Shift_L", "ShiftRight":"Shift_R", "ControlLeft":"Control_L",
+            "ControlRight":"Control_R", "AltLeft":"Alt_L", "AltRight":"Alt_R",
+            "MetaLeft":"Super_L", "MetaRight":"Super_R", "CapsLock":"Caps_Lock",
+            "NumLock":"Num_Lock",
         }
         name = names.get(code)
-        if not name and len(key) == 1:
-            name = key
         if not name and code.startswith("Key") and len(code) == 4:
             name = code[-1].lower()
         if not name and code.startswith("Digit") and len(code) == 6:
             name = code[-1]
+        if not name and code.startswith("F") and code[1:].isdigit():
+            name = code
+        if not name and len(key) == 1:
+            name = key
         if not name:
             return 0
-        return self.display.keysym_to_keycode(XK.string_to_keysym(name))
+        return self.display.keysym_to_keycode(self.XK.string_to_keysym(name))
 
-    def key(self, code: str, key: str, down: bool):
+    def key(self, code, key, down):
         if not self.display:
             return
         kc = self._keycode(code, key)
-        if not kc:
-            return
-        self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
-        self.display.sync()
+        if kc:
+            self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
+            self.display.sync()
 
-    def mouse(self, x: float, y: float, buttons: int = 0, button: int = 0, down: bool = False):
+    def mouse(self, x, y, button=0, down=False):
         if not self.display:
             return
-        px = max(0, min(self.width - 1, round(x * self.width)))
-        py = max(0, min(self.height - 1, round(y * self.height)))
+        px = max(0, min(self.width - 1, round(float(x) * self.width)))
+        py = max(0, min(self.height - 1, round(float(y) * self.height)))
         self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
         if button:
-            event = self.X.ButtonPress if down else self.X.ButtonRelease
-            self.xtest.fake_input(self.display, event, button)
+            self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
+        self.display.sync()
+
+    def wheel(self, delta):
+        if not self.display:
+            return
+        button = 4 if float(delta) < 0 else 5
+        count = min(8, max(1, round(abs(float(delta)) / 40)))
+        for _ in range(count):
+            self.xtest.fake_input(self.display, self.X.ButtonPress, button)
+            self.xtest.fake_input(self.display, self.X.ButtonRelease, button)
         self.display.sync()
 
 
-async def wait_connection_state(pc):
-    for _ in range(600):
-        if pc.connectionState in ("connected", "failed", "closed"):
-            return pc.connectionState
-        await asyncio.sleep(0.05)
-    return pc.connectionState
-
-
-async def handle_offer(request: web.Request):
-    if TOKEN and request.query.get("token", "") != TOKEN:
+async def handle_offer(request):
+    if request.query.get("token", "") != TOKEN:
         return web.json_response({"error": "unauthorized"}, status=401)
     if request.headers.get("upgrade", "").lower() != "websocket":
         return web.json_response({"error": "websocket required"}, status=400)
@@ -164,20 +158,24 @@ async def handle_offer(request: web.Request):
     try:
         video = make_video_player()
         if video.video:
-            pc.addTrack(video.video)
-            log.info("video source %sx%s@%s", WIDTH, HEIGHT, FPS)
+            transceiver = pc.addTransceiver(video.video, direction="sendonly")
+            codecs = RTCRtpSender.getCapabilities("video").codecs
+            h264 = [c for c in codecs if c.mimeType.lower() == "video/h264"]
+            if h264:
+                transceiver.setCodecPreferences(h264)
+            log.info("video capture started: %sx%s @ %s fps; H264 preference=%s", WIDTH, HEIGHT, FPS, bool(h264))
+
         try:
             audio = make_audio_player()
             if audio.audio:
                 pc.addTrack(audio.audio)
-                log.info("audio source enabled")
+                log.info("audio capture started from %s", os.getenv("PULSE_SERVER", "default"))
         except Exception as exc:
             log.warning("audio capture unavailable: %s", exc)
 
         @pc.on("datachannel")
         def on_datachannel(channel):
-            log.info("input datachannel: %s", channel.label)
-
+            log.info("input channel opened: %s", channel.label)
             @channel.on("message")
             def on_message(message):
                 if not isinstance(message, str):
@@ -188,13 +186,17 @@ async def handle_offer(request: web.Request):
                     if kind == "key":
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
                     elif kind == "mouse":
-                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("buttons", 0)), int(event.get("button", 0)), bool(event.get("down")))
+                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0)), bool(event.get("down")))
+                    elif kind == "button":
+                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 1)), bool(event.get("down")))
+                    elif kind == "wheel":
+                        input_bridge.wheel(float(event.get("delta", 0)))
                 except Exception as exc:
                     log.debug("input event failed: %s", exc)
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
-            log.info("WebRTC connection state=%s", pc.connectionState)
+            log.info("connection state=%s", pc.connectionState)
             if pc.connectionState in ("failed", "closed"):
                 await pc.close()
 
@@ -206,24 +208,20 @@ async def handle_offer(request: web.Request):
             except json.JSONDecodeError:
                 await ws.send_json({"error": "invalid json"})
                 continue
-
             if data.get("type") == "offer":
                 await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type="offer"))
                 answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
-                await ice_complete(pc)
+                await wait_ice_complete(pc)
                 await ws.send_json({"type": "answer", "sdp": pc.localDescription.sdp})
                 await ws.send_json({
-                    "type": "ready",
-                    "width": WIDTH,
-                    "height": HEIGHT,
-                    "fps": FPS,
-                    "bitrate": VIDEO_BITRATE,
-                    "transport": "webrtc",
+                    "type": "ready", "width": WIDTH, "height": HEIGHT,
+                    "fps": FPS, "bitrate": VIDEO_BITRATE,
+                    "transport": "webrtc", "videoCodec": "H264",
+                    "turn": bool(TURN_URL and TURN_USERNAME and TURN_PASSWORD),
                 })
             elif data.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
-
     except Exception as exc:
         log.exception("WebRTC session failed: %s", exc)
     finally:
@@ -239,19 +237,14 @@ async def handle_offer(request: web.Request):
 
 async def health(_request):
     return web.json_response({
-        "ok": True,
-        "service": "terminal-webrtc",
-        "display": DISPLAY,
-        "width": WIDTH,
-        "height": HEIGHT,
-        "fps": FPS,
-        "bitrate": VIDEO_BITRATE,
-        "peers": len(pcs),
-        "turn": bool(TURN_URL),
+        "ok": True, "service": "terminal-webrtc", "display": DISPLAY,
+        "width": WIDTH, "height": HEIGHT, "fps": FPS,
+        "bitrate": VIDEO_BITRATE, "peers": len(pcs),
+        "video_codec": "H264", "turn_configured": bool(TURN_URL and TURN_USERNAME and TURN_PASSWORD),
     })
 
 
-async def on_shutdown(app):
+async def on_shutdown(_app):
     await asyncio.gather(*(pc.close() for pc in list(pcs)), return_exceptions=True)
     pcs.clear()
 
