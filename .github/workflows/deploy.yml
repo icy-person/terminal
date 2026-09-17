@@ -32,6 +32,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Copy standalone WebRTC stream page
+        run: cp stream.html dist/stream.html
+
+      - name: Verify Pages artifact
+        run: |
+          test -f dist/index.html
+          test -f dist/stream.html
+          echo "GitHub Pages artifact:" 
+          find dist -maxdepth 2 -type f -printf '%p\n' | sort | head -100
+
       - name: Setup Pages
         uses: actions/configure-pages@v6
 
