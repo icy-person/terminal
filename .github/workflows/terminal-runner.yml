@@ -187,11 +187,8 @@ jobs:
           set -euo pipefail
 
           TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-          RDP_TUNNEL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
           echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-          echo "RDP_TUNNEL_TOKEN=$RDP_TUNNEL_TOKEN" >> "$GITHUB_ENV"
           export TERMINAL_TOKEN="$TOKEN"
-          export RDP_TUNNEL_TOKEN="$RDP_TUNNEL_TOKEN"
 
           if [ "$TERMINAL_SHELL" = "sh" ]; then
             SHELL_CMD=/bin/sh
@@ -204,8 +201,10 @@ jobs:
           nohup "$RUNNER_TEMP/ttyd" -W -p 7681 -i 127.0.0.1 -P 8 "$SHELL_CMD" "${SHELL_ARGS[@]}" >"$RUNNER_TEMP/ttyd.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ttyd.pid"
 
+          # No RDP authentication token: relay routes all non-/ws WebSocket
+          # upgrades to this private wstunnel endpoint. wstunnel itself is
+          # restricted to the xrdp socket and uses its default path prefix.
           nohup "$RUNNER_TEMP/wstunnel" server \
-            --restrict-http-upgrade-path-prefix "$RDP_TUNNEL_TOKEN" \
             --restrict-to 127.0.0.1:3389 \
             ws://127.0.0.1:8091 \
             >"$RUNNER_TEMP/wstunnel.log" 2>&1 &
@@ -224,8 +223,9 @@ jobs:
           kill -0 "$(cat "$RUNNER_TEMP/wstunnel.pid")"
           kill -0 "$(cat "$RUNNER_TEMP/relay.pid")"
 
+          # Verify the tokenless local RDP WebSocket path. wstunnel defaults
+          # to the same /v1 prefix on both client and server.
           nohup "$RUNNER_TEMP/wstunnel" client \
-            --http-upgrade-path-prefix "$RDP_TUNNEL_TOKEN" \
             -L "tcp://13389:127.0.0.1:3389" \
             ws://127.0.0.1:8090 \
             >"$RUNNER_TEMP/wstunnel-client-test.log" 2>&1 &
@@ -237,7 +237,7 @@ jobs:
           done
           (exec 3<>/dev/tcp/127.0.0.1/13389)
           kill "$(cat "$RUNNER_TEMP/wstunnel-client-test.pid")" || true
-          echo "Local RDP-over-WebSocket tunnel test passed."
+          echo "Local tokenless RDP-over-WebSocket tunnel test passed."
 
       - name: Start public Quick Tunnel
         shell: bash
@@ -260,7 +260,7 @@ jobs:
 
           RDP_WS_URL="${URL/https:\/\//wss://}"
           RDP_LOCAL_PORT="33890"
-          RDP_CLIENT_CMD="$RUNNER_TEMP/wstunnel client --http-upgrade-path-prefix $RDP_TUNNEL_TOKEN -L tcp://$RDP_LOCAL_PORT:127.0.0.1:3389 $RDP_WS_URL"
+          RDP_CLIENT_CMD="$RUNNER_TEMP/wstunnel client -L tcp://$RDP_LOCAL_PORT:127.0.0.1:3389 $RDP_WS_URL"
 
           echo "TERMINAL_URL=$URL" >> "$GITHUB_ENV"
           echo "TERMINAL_WS_URL=$WS_URL" >> "$GITHUB_ENV"
