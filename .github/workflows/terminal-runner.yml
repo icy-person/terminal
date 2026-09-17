@@ -27,7 +27,6 @@ jobs:
     name: Hosted terminal + RDP desktop (Arch)
     runs-on: ubuntu-26.04
     timeout-minutes: 350
-
     container:
       image: archlinux:latest
 
@@ -48,9 +47,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # xrdp and xorgxrdp are AUR packages on current Arch Linux.
-          # Preselect a JACK provider so makepkg/pacman never asks an interactive
-          # provider question inside GitHub Actions.
           pacman -S --needed --noconfirm pipewire-jack
 
           useradd -m -s /bin/bash aurbuilder
@@ -62,12 +58,7 @@ jobs:
           git clone --depth=1 https://aur.archlinux.org/xorgxrdp.git "$RUNNER_TEMP/aur-xorgxrdp"
           chown -R aurbuilder:aurbuilder "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp"
 
-          # xrdp 0.10.6.1-1 has environment-sensitive bitmap-scaling tests.
-          # Skip only the package check phase; integration tests below remain enabled.
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xrdp' && makepkg -si --noconfirm --needed --nocheck"
-
-          # Import the xorgxrdp maintainer key used by the AUR PKGBUILD, then
-          # keep normal detached-signature verification enabled.
           su - aurbuilder -c "gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys 61ECEABBF2BB40E3A35DF30A9F72CDBC01BF10EB"
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xorgxrdp' && makepkg -si --noconfirm --needed --nocheck"
 
@@ -84,45 +75,37 @@ jobs:
           XRDP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
           useradd -m -s /bin/bash "$XRDP_USER"
           printf '%s:%s\n' "$XRDP_USER" "$XRDP_PASSWORD" | chpasswd
-
           install -d -m 700 -o "$XRDP_USER" -g "$XRDP_USER" "/home/$XRDP_USER"
-          printf '%s\n' '#!/bin/sh' 'exec startxfce4' > "/home/$XRDP_USER/.xinitrc"
-          chmod 700 "/home/$XRDP_USER/.xinitrc"
-          chown "$XRDP_USER:$XRDP_USER" "/home/$XRDP_USER/.xinitrc"
 
-          # xrdp-sesman uses startwm.sh for the desktop startup. Make the XFCE
-          # session explicit instead of relying on a distro-specific default.
-          cat > /etc/xrdp/startwm.sh <<'EOF'
-#!/bin/sh
-
-if [ -r /etc/profile ]; then
-  . /etc/profile
-fi
-
-if [ -r "$HOME/.profile" ]; then
-  . "$HOME/.profile"
-fi
-
-export XDG_CURRENT_DESKTOP=XFCE
-export XDG_SESSION_DESKTOP=xfce
-export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"
-export XDG_DATA_DIRS="/usr/local/share:/usr/share"
-
-exec dbus-run-session -- startxfce4
-EOF
+          # Use printf instead of a YAML heredoc so the workflow parser never
+          # confuses the shell script body with YAML indentation.
+          printf '%s\n' \
+            '#!/bin/sh' \
+            '' \
+            'if [ -r /etc/profile ]; then' \
+            '  . /etc/profile' \
+            'fi' \
+            '' \
+            'if [ -r "$HOME/.profile" ]; then' \
+            '  . "$HOME/.profile"' \
+            'fi' \
+            '' \
+            'export XDG_CURRENT_DESKTOP=XFCE' \
+            'export XDG_SESSION_DESKTOP=xfce' \
+            'export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"' \
+            'export XDG_DATA_DIRS="/usr/local/share:/usr/share"' \
+            '' \
+            'exec dbus-run-session -- startxfce4' \
+            > /etc/xrdp/startwm.sh
           chmod 755 /etc/xrdp/startwm.sh
 
           install -d /etc/X11
           printf '%s\n' 'allowed_users=anybody' 'needs_root_rights=no' > /etc/X11/Xwrapper.config
 
-          # xorgxrdp launches a dedicated Xorg session for each RDP login.
-          # Do not use the old Xvfb/x11vnc/noVNC stack anymore.
           if grep -qE '^\s*param=Xorg\s*$' /etc/xrdp/sesman.ini; then
             sed -i 's/^\s*param=Xorg\s*$/param=\/usr\/lib\/Xorg/' /etc/xrdp/sesman.ini
           fi
 
-          # Keep RDP private to the container. Public access is provided by
-          # the WebSocket tunnel below, not by exposing raw TCP/3389.
           sed -i -E 's/^\s*port=.*/port=tcp:\/\/127.0.0.1:3389/' /etc/xrdp/xrdp.ini
 
           mkdir -p /run/xrdp /var/log/xrdp
@@ -140,7 +123,6 @@ EOF
           WSTUNNEL_ARCHIVE="wstunnel_${WSTUNNEL_VERSION}_linux_amd64.tar.gz"
           WSTUNNEL_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/${WSTUNNEL_ARCHIVE}"
           WSTUNNEL_CHECKSUMS_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/checksums.txt"
-
           curl -fsSL "$WSTUNNEL_URL" -o "$RUNNER_TEMP/$WSTUNNEL_ARCHIVE"
           curl -fsSL "$WSTUNNEL_CHECKSUMS_URL" -o "$RUNNER_TEMP/wstunnel-checksums.txt"
           (cd "$RUNNER_TEMP" && grep -F "$WSTUNNEL_ARCHIVE" wstunnel-checksums.txt | sha256sum -c -)
@@ -199,9 +181,6 @@ EOF
           kill -0 "$(cat "$RUNNER_TEMP/xrdp-sesman.pid")"
           kill -0 "$(cat "$RUNNER_TEMP/xrdp.pid")"
 
-          # xrdp normally creates Xorg + XFCE only after the first RDP login.
-          # Pre-create that exact xrdp session with xrdp-sesrun so the GUI is
-          # already alive before the WebSocket/RDP tunnel is exposed.
           SESRUN_LOG="$RUNNER_TEMP/xrdp-sesrun.log"
           printf '%s\n' "$RDP_PASSWORD" | \
             xrdp-sesrun -F 0 -t Xorg -g 1920x1080 "$RDP_USER" \
@@ -219,7 +198,6 @@ EOF
 
           echo "XRDP_DISPLAY=$DISPLAY_NUM" >> "$GITHUB_ENV"
 
-          # Wait for Xorg and the XFCE session itself, not merely for port 3389.
           for _ in $(seq 1 60); do
             if [ -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ] && \
                pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null 2>&1 && \
@@ -266,9 +244,6 @@ EOF
           nohup "$RUNNER_TEMP/ttyd" -W -p 7681 -i 127.0.0.1 -P 8 "$SHELL_CMD" "${SHELL_ARGS[@]}" >"$RUNNER_TEMP/ttyd.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ttyd.pid"
 
-          # No RDP authentication token: relay routes all non-/ws WebSocket
-          # upgrades to this private wstunnel endpoint. wstunnel itself is
-          # restricted to the xrdp socket and uses its default path prefix.
           nohup "$RUNNER_TEMP/wstunnel" server \
             --websocket-mask-frame \
             --restrict-to 127.0.0.1:3389 \
@@ -289,8 +264,6 @@ EOF
           kill -0 "$(cat "$RUNNER_TEMP/wstunnel.pid")"
           kill -0 "$(cat "$RUNNER_TEMP/relay.pid")"
 
-          # Verify the tokenless local RDP WebSocket path. wstunnel defaults
-          # to the same /v1 prefix on both client and server.
           nohup "$RUNNER_TEMP/wstunnel" client \
             --websocket-mask-frame \
             -L "tcp://13389:127.0.0.1:3389" \
