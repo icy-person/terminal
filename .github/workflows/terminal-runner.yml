@@ -44,8 +44,13 @@ jobs:
 
       - name: Build and install Arch RDP packages
         shell: bash
+        env:
+          XRDP_FIXED_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           set -euo pipefail
+
+          [ -n "$XRDP_FIXED_PASSWORD" ] || { echo "Missing required repository secret: RDP_PASSWORD"; exit 1; }
+          echo "::add-mask::$XRDP_FIXED_PASSWORD"
 
           pacman -S --needed --noconfirm pipewire-jack
 
@@ -73,7 +78,7 @@ jobs:
             tar
 
           XRDP_USER="rdpuser"
-          XRDP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
+          XRDP_PASSWORD="$XRDP_FIXED_PASSWORD"
           useradd -m -s /bin/bash "$XRDP_USER"
           printf '%s:%s\n' "$XRDP_USER" "$XRDP_PASSWORD" | chpasswd
           install -d -m 700 -o "$XRDP_USER" -g "$XRDP_USER" "/home/$XRDP_USER"
@@ -331,7 +336,7 @@ jobs:
           echo "HOSTED TERMINAL: $ENDPOINT_URL"
           echo "RDP WebSocket endpoint: $RDP_WS_URL"
           echo "RDP user: $RDP_USER"
-          echo "RDP password: $RDP_PASSWORD"
+          echo "RDP password: fixed repository secret (RDP_PASSWORD)"
           echo "RDP local forward command: $RDP_CLIENT_CMD"
           echo "Then connect your RDP client to: 127.0.0.1:$RDP_LOCAL_PORT"
 
@@ -372,7 +377,7 @@ jobs:
           echo "Terminal: $TERMINAL_PAGES_URL"
           echo "RDP WebSocket: $RDP_WS_URL_PUBLIC"
           echo "RDP user: $RDP_USER"
-          echo "RDP password: $RDP_PASSWORD"
+          echo "RDP password: fixed repository secret (RDP_PASSWORD)"
           echo "Run the printed wstunnel client command locally, then connect your RDP client to 127.0.0.1:$RDP_LOCAL_PORT."
           echo "Runner services remain available until cancellation/timeout."
           while true; do
