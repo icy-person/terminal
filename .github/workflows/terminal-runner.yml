@@ -68,6 +68,7 @@ jobs:
             dbus \
             xorg \
             xorg-xinit \
+            freerdp \
             curl \
             tar
 
@@ -77,8 +78,6 @@ jobs:
           printf '%s:%s\n' "$XRDP_USER" "$XRDP_PASSWORD" | chpasswd
           install -d -m 700 -o "$XRDP_USER" -g "$XRDP_USER" "/home/$XRDP_USER"
 
-          # Use printf instead of a YAML heredoc so the workflow parser never
-          # confuses the shell script body with YAML indentation.
           printf '%s\n' \
             '#!/bin/sh' \
             '' \
@@ -135,7 +134,7 @@ jobs:
           echo "WSTUNNEL_VERSION=$WSTUNNEL_VERSION" >> "$GITHUB_ENV"
 
           xrdp --version
-          xrdp-sesrun --help >/dev/null
+          xfreerdp3 /version
           XORG_VERSION="$(Xorg -version 2>&1)"
           printf '%s\n' "$XORG_VERSION"
 
@@ -181,31 +180,44 @@ jobs:
           kill -0 "$(cat "$RUNNER_TEMP/xrdp-sesman.pid")"
           kill -0 "$(cat "$RUNNER_TEMP/xrdp.pid")"
 
-          SESRUN_LOG="$RUNNER_TEMP/xrdp-sesrun.log"
-          printf '%s\n' "$RDP_PASSWORD" | \
-            xrdp-sesrun -F 0 -t Xorg -g 1920x1080 "$RDP_USER" \
-            >"$SESRUN_LOG" 2>&1
+          # Use the real xrdp login path once. xrdp-sesrun creates a test
+          # session, but that session is not a reliable reconnect target for
+          # a later normal xrdp connection.
+          BOOTSTRAP_LOG="$RUNNER_TEMP/xrdp-bootstrap.log"
+          nohup xfreerdp3 \
+            /v:127.0.0.1:3389 \
+            /u:"$RDP_USER" \
+            /p:"$RDP_PASSWORD" \
+            /w:1920 \
+            /h:1080 \
+            /cert:ignore \
+            +auto-reconnect \
+            /auto-reconnect-max-retries:0 \
+            >"$BOOTSTRAP_LOG" 2>&1 &
+          BOOTSTRAP_PID=$!
+          echo "$BOOTSTRAP_PID" > "$RUNNER_TEMP/xrdp-bootstrap.pid"
 
-          cat "$SESRUN_LOG"
-
-          DISPLAY_NUM="$(sed -ne 's/^ok.*display=\(:[0-9][0-9]*\).*/\1/p' "$SESRUN_LOG" | tail -n1)"
-          [ -n "$DISPLAY_NUM" ] || {
-            echo "xrdp-sesrun did not create an Xorg session."
-            cat "$SESRUN_LOG"
-            cat "$RUNNER_TEMP/xrdp-sesman.log" || true
-            exit 1
-          }
-
-          echo "XRDP_DISPLAY=$DISPLAY_NUM" >> "$GITHUB_ENV"
-
-          for _ in $(seq 1 60); do
-            if [ -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ] && \
-               pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null 2>&1 && \
+          GUI_READY=0
+          for _ in $(seq 1 90); do
+            if pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null 2>&1 && \
                pgrep -u "$RDP_USER" -f 'xfce4-session|xfdesktop|xfwm4' >/dev/null 2>&1; then
+              GUI_READY=1
               break
+            fi
+            if ! kill -0 "$BOOTSTRAP_PID" >/dev/null 2>&1; then
+              echo "Local xfreerdp bootstrap exited before XFCE became ready."
+              cat "$BOOTSTRAP_LOG" || true
+              cat "$RUNNER_TEMP/xrdp-sesman.log" || true
+              exit 1
             fi
             sleep 1
           done
+          [ "$GUI_READY" -eq 1 ] || {
+            echo "XFCE did not become ready through the real xrdp login path."
+            cat "$BOOTSTRAP_LOG" || true
+            cat "$RUNNER_TEMP/xrdp-sesman.log" || true
+            exit 1
+          }
 
           echo "=== GUI processes ==="
           ps -eo user,pid,ppid,cmd | grep -E '[X]org|xfce4-session|xfdesktop|xfwm4|xfconfd' || true
@@ -214,11 +226,19 @@ jobs:
           echo "=== xrdp session log ==="
           tail -n 120 "$RUNNER_TEMP/xrdp-sesman.log" || true
 
-          [ -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ]
+          sleep 5
+          kill -TERM "$BOOTSTRAP_PID" >/dev/null 2>&1 || true
+          for _ in $(seq 1 20); do
+            kill -0 "$BOOTSTRAP_PID" >/dev/null 2>&1 || break
+            sleep 1
+          done
+          kill -KILL "$BOOTSTRAP_PID" >/dev/null 2>&1 || true
+
+          sleep 2
           pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null
           pgrep -u "$RDP_USER" -f 'xfce4-session|xfdesktop|xfwm4' >/dev/null
 
-          echo "XFCE desktop is UP on display $DISPLAY_NUM before RDP tunnel startup."
+          echo "XFCE desktop is UP before RDP tunnel startup."
           echo "RDP is listening privately on 127.0.0.1:3389"
           echo "RDP user: $RDP_USER"
 
@@ -320,10 +340,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "[1/4] XFCE session"
-          [ -n "${XRDP_DISPLAY:-}" ]
-          [ -S "/tmp/.X11-unix/X${XRDP_DISPLAY#:}" ]
+          pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null
           pgrep -u "$RDP_USER" -f 'xfce4-session|xfdesktop|xfwm4' >/dev/null
-          echo "XFCE is running on $XRDP_DISPLAY"
+          echo "XFCE is running"
 
           echo "[2/4] local relay health"
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
