@@ -99,14 +99,116 @@ jobs:
         run: |
           set -euo pipefail
           V='2026.9.1'
-          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/$V/cloudflared-linux-amd64" -o "$RUNNER_TEMP/cloudflared"
-          chmod +x "$RUNNER_TEMP/cloudflared"
-          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://127.0.0.1:8092 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          CLOUDFLARED="$RUNNER_TEMP/cloudflared"
+          CLOUDFLARED_LOG="$RUNNER_TEMP/cloudflared.log"
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/$V/cloudflared-linux-amd64" -o "$CLOUDFLARED"
+          chmod +x "$CLOUDFLARED"
+          rm -f "$CLOUDFLARED_LOG"
+          nohup "$CLOUDFLARED" tunnel --no-autoupdate --url http://127.0.0.1:8092 > "$CLOUDFLARED_LOG" 2>&1 &
+          CLOUDFLARED_PID=$!
+          echo "[Cloudflare] cloudflared PID: $CLOUDFLARED_PID"
+
           URL=''
-          for _ in $(seq 1 90); do URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"; [ -n "$URL" ] && break; sleep 2; done
-          [ -n "$URL" ] || { cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
-          echo '=== Public health ==='
-          curl -fsS --max-time 20 "$URL/healthz"; echo
+          for _ in $(seq 1 90); do
+            URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$CLOUDFLARED_LOG" | head -n1 || true)"
+            [ -n "$URL" ] && break
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo '[Cloudflare] cloudflared exited before publishing a URL'
+              cat "$CLOUDFLARED_LOG"
+              exit 1
+            fi
+            sleep 2
+          done
+          [ -n "$URL" ] || { echo '[Cloudflare] Timed out waiting for Quick Tunnel URL'; cat "$CLOUDFLARED_LOG"; exit 1; }
+
+          HOST="${URL#https://}"
+          echo "[Cloudflare] Quick Tunnel URL: $URL"
+          echo "[Cloudflare] Host: $HOST"
+
+          echo '=== Tunnel readiness / DNS diagnostics ==='
+          curl -fsS --max-time 5 http://127.0.0.1:8092/healthz; echo
+
+          READY=0
+          LAST_ERROR=''
+          for attempt in $(seq 1 30); do
+            echo "[Cloudflare] readiness attempt $attempt/30"
+            LOCAL_IPS="$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
+            echo "[DNS] runner resolver A: ${LOCAL_IPS:-not resolved yet}"
+
+            CF_DOH="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$HOST&type=A" 2>/dev/null || true)"
+            GOOGLE_DOH="$(curl -fsS --max-time 5 "https://dns.google/resolve?name=$HOST&type=A" 2>/dev/null || true)"
+            CF_IPS="$(python3 - "$CF_DOH" <<'PY'
+import json,sys
+try:
+    d=json.loads(sys.argv[1])
+    print(','.join(sorted({a['data'] for a in d.get('Answer',[]) if a.get('type')==1 and a.get('data')})))
+except Exception:
+    pass
+PY
+)"
+            GOOGLE_IPS="$(python3 - "$GOOGLE_DOH" <<'PY'
+import json,sys
+try:
+    d=json.loads(sys.argv[1])
+    print(','.join(sorted({a['data'] for a in d.get('Answer',[]) if a.get('type')==1 and a.get('data')})))
+except Exception:
+    pass
+PY
+)"
+            echo "[DNS] Cloudflare DoH A: ${CF_IPS:-not resolved}"
+            echo "[DNS] Google DoH A: ${GOOGLE_IPS:-not resolved}"
+
+            if curl -fsS --max-time 10 "$URL/healthz" >/tmp/public-health.json 2>/tmp/public-health.err; then
+              echo '[HTTP] normal DNS + HTTPS: READY'
+              cat /tmp/public-health.json; echo
+              READY=1
+              break
+            fi
+            LAST_ERROR="$(cat /tmp/public-health.err 2>/dev/null || true)"
+            echo "[HTTP] normal DNS + HTTPS: not ready (${LAST_ERROR:-unknown error})"
+
+            TEST_IP=''
+            if [ -n "$LOCAL_IPS" ]; then TEST_IP="${LOCAL_IPS%%,*}"; elif [ -n "$CF_IPS" ]; then TEST_IP="${CF_IPS%%,*}"; elif [ -n "$GOOGLE_IPS" ]; then TEST_IP="${GOOGLE_IPS%%,*}"; fi
+            if [ -n "$TEST_IP" ]; then
+              echo "[HTTP] forced HTTPS test via $TEST_IP"
+              if curl -fsS --max-time 10 --resolve "$HOST:443:$TEST_IP" "$URL/healthz" >/tmp/public-health-forced.json 2>/tmp/public-health-forced.err; then
+                echo '[HTTP] forced DNS + HTTPS: READY'
+                cat /tmp/public-health-forced.json; echo
+                READY=1
+                break
+              fi
+              echo "[HTTP] forced HTTPS: $(cat /tmp/public-health-forced.err 2>/dev/null || true)"
+            fi
+
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo '[Cloudflare] cloudflared exited while waiting for readiness'
+              break
+            fi
+            sleep 3
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo '=== Cloudflare readiness FAILED ==='
+            echo "[Cloudflare] URL: $URL"
+            echo "[Cloudflare] PID alive: $(kill -0 "$CLOUDFLARED_PID" 2>/dev/null && echo yes || echo no)"
+            echo "[Cloudflare] Last HTTP error: ${LAST_ERROR:-none}"
+            echo '--- cloudflared log ---'
+            cat "$CLOUDFLARED_LOG" || true
+            echo '--- local WebRTC health ---'
+            curl -v --max-time 5 http://127.0.0.1:8092/healthz || true
+            echo '--- WebRTC server log ---'
+            tail -n 120 "$RUNNER_TEMP/webrtc.log" || true
+            echo '--- runner DNS configuration ---'
+            cat /etc/resolv.conf || true
+            echo '--- runner resolver ---'
+            getent ahostsv4 "$HOST" || true
+            echo '--- Cloudflare DoH raw response ---'
+            printf '%s\n' "$CF_DOH" || true
+            echo '--- Google DoH raw response ---'
+            printf '%s\n' "$GOOGLE_DOH" || true
+            exit 1
+          fi
+
           echo '=== Public signaling auth check ==='
           STATUS="$(curl -sS --max-time 20 -o "$RUNNER_TEMP/auth-check.json" -w '%{http_code}' -X POST -H 'Content-Type: text/plain' --data '{"password":"","sdp":""}' "$URL/webrtc")"
           cat "$RUNNER_TEMP/auth-check.json"; echo
