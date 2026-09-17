@@ -65,11 +65,24 @@ jobs:
           su - aurbuilder -c "gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys 61ECEABBF2BB40E3A35DF30A9F72CDBC01BF10EB"
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xorgxrdp' && makepkg -si --noconfirm --needed --nocheck"
 
-          pacman -S --needed --noconfirm xfce4 xfce4-terminal dbus xorg xorg-xinit curl tar
+          pacman -S --needed --noconfirm \
+            xfce4 xfce4-terminal dbus xorg xorg-xinit curl tar \
+            firefox \
+            mesa mesa-utils \
+            vulkan-icd-loader vulkan-tools vulkan-swrast vulkan-radeon \
+            pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber \
+            alsa-utils pavucontrol
 
           XRDP_USER=rdpuser
           useradd -m -s /bin/bash "$XRDP_USER"
           printf '%s:%s\n' "$XRDP_USER" "$XRDP_FIXED_PASSWORD" | chpasswd
+
+          # Give the RDP user full passwordless sudo/root access.
+          usermod -aG wheel "$XRDP_USER"
+          printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/99-rdpuser-wheel
+          chmod 440 /etc/sudoers.d/99-rdpuser-wheel
+          visudo -cf /etc/sudoers
+          visudo -cf /etc/sudoers.d/99-rdpuser-wheel
 
           cat > /etc/xrdp/startwm.sh <<'EOF'
           #!/bin/sh
@@ -94,9 +107,6 @@ jobs:
           from pathlib import Path
           import re
 
-          # Keep only the native Xorg connection section in xrdp.ini.
-          # Everything after [Xorg] is a selectable/proxy connection type;
-          # removing it prevents xrdp from ever offering Xvnc/libvnc.
           p = Path('/etc/xrdp/xrdp.ini')
           s = p.read_text()
           m = re.search(r'^\[Xorg\]\n', s, re.M)
@@ -106,24 +116,13 @@ jobs:
           n = re.search(r'^\[[^\n]+\]\n', tail[len('[Xorg]\n'):], re.M)
           if n:
               tail = tail[:len('[Xorg]\n') + n.start()]
-
-          # xrdp's Xorg connection must explicitly provide an IP. Without it,
-          # libxup.so reaches the connection stage with an empty target and
-          # xrdp reports: "error - no ip set".
           lines = tail.rstrip().splitlines()
           if not lines or lines[0] != '[Xorg]':
               raise SystemExit('invalid [Xorg] section')
           lines = [line for line in lines if not re.match(r'^(ip|port|code)=', line)]
-          insert_at = len(lines)
-          lines[insert_at:insert_at] = [
-              'ip=127.0.0.1',
-              'port=-1',
-              'code=20',
-          ]
+          lines.extend(['ip=127.0.0.1', 'port=-1', 'code=20'])
           p.write_text(s[:m.start()] + '\n'.join(lines).rstrip() + '\n')
 
-          # Remove the Xvnc display-server definition from sesman.ini while
-          # preserving [Chansrv] and the remaining session configuration.
           p = Path('/etc/xrdp/sesman.ini')
           s = p.read_text()
           s = re.sub(r'^\[Xvnc\]\n.*?(?=^\[[^\n]+\]\n|\Z)', '', s, flags=re.M | re.S)
