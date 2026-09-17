@@ -30,9 +30,13 @@ if not TOKEN:
 pcs = set()
 
 
+def turn_configured():
+    return bool(TURN_URL and TURN_USERNAME and TURN_PASSWORD)
+
+
 def ice_servers():
     servers = [RTCIceServer(urls=[STUN_URL])]
-    if TURN_URL and TURN_USERNAME and TURN_PASSWORD:
+    if turn_configured():
         servers.append(RTCIceServer(urls=[TURN_URL], username=TURN_USERNAME, credential=TURN_PASSWORD))
     return servers
 
@@ -142,6 +146,31 @@ class InputBridge:
         self.display.sync()
 
 
+async def health(_request):
+    return web.json_response({
+        "ok": True, "service": "terminal-webrtc", "display": DISPLAY,
+        "width": WIDTH, "height": HEIGHT, "fps": FPS,
+        "bitrate": VIDEO_BITRATE, "peers": len(pcs),
+        "video_codec": "H264", "turn_configured": turn_configured(),
+    })
+
+
+async def config(request):
+    if request.query.get("token", "") != TOKEN:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({
+        "iceServers": [
+            {"urls": STUN_URL},
+            *([{"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_PASSWORD}] if turn_configured() else []),
+        ],
+        "fps": FPS,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "bitrate": VIDEO_BITRATE,
+        "videoCodec": "H264",
+    })
+
+
 async def handle_offer(request):
     if request.query.get("token", "") != TOKEN:
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -185,10 +214,8 @@ async def handle_offer(request):
                     kind = event.get("type")
                     if kind == "key":
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
-                    elif kind == "mouse":
-                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0)), bool(event.get("down")))
-                    elif kind == "button":
-                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 1)), bool(event.get("down")))
+                    elif kind in ("mouse", "button"):
+                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0 if kind == "mouse" else 1)), bool(event.get("down")))
                     elif kind == "wheel":
                         input_bridge.wheel(float(event.get("delta", 0)))
                 except Exception as exc:
@@ -217,8 +244,7 @@ async def handle_offer(request):
                 await ws.send_json({
                     "type": "ready", "width": WIDTH, "height": HEIGHT,
                     "fps": FPS, "bitrate": VIDEO_BITRATE,
-                    "transport": "webrtc", "videoCodec": "H264",
-                    "turn": bool(TURN_URL and TURN_USERNAME and TURN_PASSWORD),
+                    "transport": "webrtc", "videoCodec": "H264", "turn": turn_configured(),
                 })
             elif data.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
@@ -235,15 +261,6 @@ async def handle_offer(request):
     return ws
 
 
-async def health(_request):
-    return web.json_response({
-        "ok": True, "service": "terminal-webrtc", "display": DISPLAY,
-        "width": WIDTH, "height": HEIGHT, "fps": FPS,
-        "bitrate": VIDEO_BITRATE, "peers": len(pcs),
-        "video_codec": "H264", "turn_configured": bool(TURN_URL and TURN_USERNAME and TURN_PASSWORD),
-    })
-
-
 async def on_shutdown(_app):
     await asyncio.gather(*(pc.close() for pc in list(pcs)), return_exceptions=True)
     pcs.clear()
@@ -251,6 +268,7 @@ async def on_shutdown(_app):
 
 app = web.Application()
 app.router.add_get("/healthz", health)
+app.router.add_get("/config", config)
 app.router.add_get("/webrtc", handle_offer)
 app.on_shutdown.append(on_shutdown)
 
