@@ -1,5 +1,8 @@
-aiortc>=1.14,<2
+# aiortc 1.15.0 is the current stable WebRTC stack and supports Python 3.14.
+aiortc>=1.15,<2
 aiohttp>=3.12,<4
-av>=14,<15
-Pillow>=11,<12
+# Do not pin PyAV to the old 14.x series: it can force a source build against
+# the runner's current FFmpeg. Current PyAV publishes binary wheels.
+av>=15,<17
+Pillow>=11,<13
 python-xlib>=0.33,<1
