@@ -5,42 +5,48 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>WebRTC Stream</title>
   <style>
-    :root{color-scheme:dark}html,body{margin:0;width:100%;height:100%;background:#05070a;font-family:system-ui,sans-serif;overflow:hidden}main{width:100%;height:100%;display:grid;place-items:center}video{width:100%;height:100%;object-fit:contain;background:#000;cursor:crosshair}#status{position:fixed;left:14px;top:14px;padding:7px 10px;border-radius:9px;background:#111a;color:#fff;font:12px ui-monospace,monospace;backdrop-filter:blur(8px);z-index:2}#error{display:none;position:fixed;inset:auto 14px 14px 14px;padding:10px;border-radius:10px;background:#3a1111;color:#ffd7d7;font:13px system-ui;z-index:3;white-space:pre-wrap}
+    :root{color-scheme:dark}html,body{margin:0;width:100%;height:100%;background:#05070a;font-family:system-ui,sans-serif;overflow:hidden}main{width:100%;height:100%;display:grid;place-items:center}video{width:100%;height:100%;object-fit:contain;background:#000;cursor:crosshair;outline:0}#status{position:fixed;left:14px;top:14px;padding:7px 10px;border-radius:9px;background:#111a;color:#fff;font:12px ui-monospace,monospace;backdrop-filter:blur(8px);z-index:2}#error{display:none;position:fixed;inset:auto 14px 14px 14px;padding:10px;border-radius:10px;background:#3a1111;color:#ffd7d7;font:13px system-ui;z-index:3;white-space:pre-wrap}#hint{position:fixed;right:14px;top:14px;padding:7px 10px;border-radius:9px;background:#111a;color:#ddd;font:12px system-ui;z-index:2}
   </style>
 </head>
 <body>
-<main><video id="video" autoplay playsinline></video></main>
-<div id="status">connecting…</div><div id="error"></div>
+<main><video id="video" autoplay playsinline tabindex="0"></video></main>
+<div id="status">connecting…</div><div id="hint">Click video for keyboard + mouse capture</div><div id="error"></div>
 <script>
 const qs=new URLSearchParams(location.search), endpoint=qs.get('endpoint'), token=qs.get('token');
-const video=document.getElementById('video'),status=document.getElementById('status'),errorBox=document.getElementById('error');
+const video=document.getElementById('video'),status=document.getElementById('status'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 if(!endpoint||!token){status.textContent='missing stream endpoint';throw new Error('Missing endpoint/token');}
-let ws,pc,dc,lastMouse=0;
+let ws,pc,dc,lastMouse=0,statsTimer;
 const setStatus=s=>status.textContent=s;
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e)};
 function send(o){if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));}
 function codeKey(e,down){send({type:'key',code:e.code,key:e.key,down});}
-video.addEventListener('mousemove',e=>{const now=performance.now();if(now-lastMouse<8)return;lastMouse=now;const r=video.getBoundingClientRect();send({type:'mouse',x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,buttons:e.buttons});});
-video.addEventListener('mousedown',e=>{video.focus();send({type:'mouse',x:(e.clientX-video.getBoundingClientRect().left)/video.clientWidth,y:(e.clientY-video.getBoundingClientRect().top)/video.clientHeight,button:e.button+1,down:true,buttons:e.buttons});});
-video.addEventListener('mouseup',e=>{send({type:'button',button:e.button+1,down:false});});
+function coords(e){const r=video.getBoundingClientRect();return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
+video.addEventListener('click',()=>{video.focus();if(document.pointerLockElement!==video)video.requestPointerLock?.();});
+video.addEventListener('mousemove',e=>{const now=performance.now();if(now-lastMouse<8)return;lastMouse=now;if(document.pointerLockElement===video){send({type:'mouse_rel',dx:e.movementX,dy:e.movementY});}else{const p=coords(e);send({type:'mouse',x:p.x,y:p.y,buttons:e.buttons});}});
+video.addEventListener('mousedown',e=>{video.focus();const p=coords(e);send({type:'button',x:p.x,y:p.y,button:e.button+1,down:true});});
+video.addEventListener('mouseup',e=>send({type:'button',button:e.button+1,down:false}));
 video.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
 window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();codeKey(e,true);});
-window.addEventListener('keyup',e=>{codeKey(e,false);});
+window.addEventListener('keyup',e=>codeKey(e,false));
+video.addEventListener('dblclick',()=>{if(document.fullscreenElement)document.exitFullscreen();else video.requestFullscreen?.();});
 async function start(){
-  setStatus('creating peer connection…');
-  pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-  pc.ontrack=e=>{if(e.track.kind==='video')video.srcObject=e.streams[0]||new MediaStream([e.track]);};
+  setStatus('loading WebRTC configuration…');
+  const base=new URL(endpoint);base.pathname=base.pathname.replace(/\/webrtc$/,'/config');base.search='token='+encodeURIComponent(token);
+  const cfg=await fetch(base,{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Configuration request failed: HTTP '+r.status);return r.json();});
+  pc=new RTCPeerConnection({iceServers:cfg.iceServers||[]});
+  pc.ontrack=e=>{if(e.track.kind==='video'){video.srcObject=e.streams[0]||new MediaStream([e.track]);video.play().catch(()=>{hint.textContent='Click video once to enable audio';});}else if(e.track.kind==='audio'){const s=video.srcObject||new MediaStream();s.addTrack(e.track);video.srcObject=s;video.play().catch(()=>{});}};
   pc.onconnectionstatechange=()=>setStatus('WebRTC '+pc.connectionState);
-  pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE connection failed. A TURN relay may be required for the hosted runner network.');};
+  pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Configure WEBRTC_TURN_URL, WEBRTC_TURN_USERNAME and WEBRTC_TURN_PASSWORD repository secrets for a TURN relay.');};
   dc=pc.createDataChannel('input',{ordered:false,maxRetransmits:0});
-  dc.onopen=()=>setStatus('WebRTC connected');
+  dc.onopen=()=>{setStatus(`WebRTC connected · ${cfg.width}×${cfg.height} @ ${cfg.fps} FPS`);hint.textContent='Click video for pointer lock · double-click for fullscreen';};
   pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});
   const offer=await pc.createOffer();await pc.setLocalDescription(offer);
-  for(let i=0;i<100&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
+  for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
   ws=new WebSocket(endpoint+'&token='+encodeURIComponent(token));
   ws.onopen=()=>{setStatus('signaling connected');ws.send(JSON.stringify({type:'offer',sdp:pc.localDescription.sdp}));};
-  ws.onmessage=async e=>{const m=JSON.parse(e.data);if(m.type==='answer'){await pc.setRemoteDescription({type:'answer',sdp:m.sdp});}else if(m.type==='ready'){setStatus(`WebRTC ${m.width}×${m.height} @ ${m.fps} FPS`);}};
+  ws.onmessage=async e=>{const m=JSON.parse(e.data);if(m.type==='answer')await pc.setRemoteDescription({type:'answer',sdp:m.sdp});else if(m.type==='ready')setStatus(`WebRTC ${m.width}×${m.height} @ ${m.fps} FPS · ${m.videoCodec}`);};
   ws.onerror=()=>showError('WebSocket signaling failed.');ws.onclose=()=>{if(pc.connectionState!=='connected')setStatus('signaling closed');};
+  statsTimer=setInterval(async()=>{if(!pc)return;for(const r of await pc.getStats()){if(r.type==='inbound-rtp'&&r.kind==='video'){const fps=Math.round(r.framesPerSecond||0);const lost=r.packetsLost||0;status.title=`received ${fps} FPS · lost ${lost}`;} }},1000);
 }
 start().catch(showError);
 </script>
