@@ -166,7 +166,7 @@ async def health(_request):
 
 async def config(request):
     if request.query.get("token", "") != TOKEN:
-        return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"error": "unauthorized"}, status=401, headers={"Access-Control-Allow-Origin": "*"})
     servers = [{"urls": STUN_URL}]
     if turn_configured():
         servers.append({"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_PASSWORD})
@@ -174,23 +174,34 @@ async def config(request):
         "iceServers": servers,
         "fps": FPS, "width": WIDTH, "height": HEIGHT,
         "bitrate": VIDEO_BITRATE, "videoCodec": "H264",
-    })
+    }, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
 
-async def handle_offer(request):
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Cache-Control": "no-store",
+    }
+
+
+async def handle_offer_post(request):
+    """HTTP signaling: POST a fully ICE-gathered SDP offer and return the answer."""
     if request.query.get("token", "") != TOKEN:
-        return web.json_response({"error": "unauthorized"}, status=401)
-    if request.headers.get("upgrade", "").lower() != "websocket":
-        return web.json_response({"error": "websocket required"}, status=400)
+        return web.json_response({"error": "unauthorized"}, status=401, headers=cors_headers())
 
-    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
-    await ws.prepare(request)
     pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers()))
     pcs.add(pc)
     input_bridge = InputBridge()
     video = audio = None
 
     try:
+        data = await request.json()
+        sdp = data.get("sdp", "")
+        if not sdp:
+            return web.json_response({"error": "missing sdp"}, status=400, headers=cors_headers())
+
         video = make_video_player()
         if video.video:
             transceiver = pc.addTransceiver(video.video, direction="sendonly")
@@ -235,38 +246,32 @@ async def handle_offer(request):
             if pc.connectionState in ("failed", "closed"):
                 await pc.close()
 
-        async for message in ws:
-            if message.type != web.WSMsgType.TEXT:
-                continue
-            try:
-                data = json.loads(message.data)
-            except json.JSONDecodeError:
-                await ws.send_json({"error": "invalid json"})
-                continue
-            if data.get("type") == "offer":
-                await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type="offer"))
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
-                await wait_ice_complete(pc)
-                await ws.send_json({"type": "answer", "sdp": pc.localDescription.sdp})
-                await ws.send_json({
-                    "type": "ready", "width": WIDTH, "height": HEIGHT,
-                    "fps": FPS, "bitrate": VIDEO_BITRATE,
-                    "transport": "webrtc", "videoCodec": "H264", "turn": turn_configured(),
-                })
-            elif data.get("type") == "ping":
-                await ws.send_json({"type": "pong"})
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await wait_ice_complete(pc)
+
+        return web.json_response({
+            "type": "answer", "sdp": pc.localDescription.sdp,
+            "ready": {
+                "width": WIDTH, "height": HEIGHT, "fps": FPS,
+                "bitrate": VIDEO_BITRATE, "transport": "webrtc",
+                "videoCodec": "H264", "turn": turn_configured(),
+            },
+        }, headers=cors_headers())
     except Exception as exc:
-        log.exception("WebRTC session failed: %s", exc)
-    finally:
+        log.exception("WebRTC HTTP signaling failed: %s", exc)
         pcs.discard(pc)
         if video:
             video.stop()
         if audio:
             audio.stop()
         await pc.close()
-        await ws.close()
-    return ws
+        return web.json_response({"error": "WebRTC signaling failed", "detail": str(exc)}, status=500, headers=cors_headers())
+
+
+async def handle_offer_options(_request):
+    return web.Response(status=204, headers=cors_headers())
 
 
 async def on_shutdown(_app):
@@ -277,7 +282,8 @@ async def on_shutdown(_app):
 app = web.Application()
 app.router.add_get("/healthz", health)
 app.router.add_get("/config", config)
-app.router.add_get("/webrtc", handle_offer)
+app.router.add_post("/webrtc", handle_offer_post)
+app.router.add_options("/webrtc", handle_offer_options)
 app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
