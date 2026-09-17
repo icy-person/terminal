@@ -90,6 +90,28 @@ jobs:
           chmod 700 "/home/$XRDP_USER/.xinitrc"
           chown "$XRDP_USER:$XRDP_USER" "/home/$XRDP_USER/.xinitrc"
 
+          # xrdp-sesman uses startwm.sh for the desktop startup. Make the XFCE
+          # session explicit instead of relying on a distro-specific default.
+          cat > /etc/xrdp/startwm.sh <<'EOF'
+#!/bin/sh
+
+if [ -r /etc/profile ]; then
+  . /etc/profile
+fi
+
+if [ -r "$HOME/.profile" ]; then
+  . "$HOME/.profile"
+fi
+
+export XDG_CURRENT_DESKTOP=XFCE
+export XDG_SESSION_DESKTOP=xfce
+export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"
+export XDG_DATA_DIRS="/usr/local/share:/usr/share"
+
+exec dbus-run-session -- startxfce4
+EOF
+          chmod 755 /etc/xrdp/startwm.sh
+
           install -d /etc/X11
           printf '%s\n' 'allowed_users=anybody' 'needs_root_rights=no' > /etc/X11/Xwrapper.config
 
@@ -131,6 +153,7 @@ jobs:
           echo "WSTUNNEL_VERSION=$WSTUNNEL_VERSION" >> "$GITHUB_ENV"
 
           xrdp --version
+          xrdp-sesrun --help >/dev/null
           XORG_VERSION="$(Xorg -version 2>&1)"
           printf '%s\n' "$XORG_VERSION"
 
@@ -176,6 +199,48 @@ jobs:
           kill -0 "$(cat "$RUNNER_TEMP/xrdp-sesman.pid")"
           kill -0 "$(cat "$RUNNER_TEMP/xrdp.pid")"
 
+          # xrdp normally creates Xorg + XFCE only after the first RDP login.
+          # Pre-create that exact xrdp session with xrdp-sesrun so the GUI is
+          # already alive before the WebSocket/RDP tunnel is exposed.
+          SESRUN_LOG="$RUNNER_TEMP/xrdp-sesrun.log"
+          printf '%s\n' "$RDP_PASSWORD" | \
+            xrdp-sesrun -F 0 -t Xorg -g 1920x1080 "$RDP_USER" \
+            >"$SESRUN_LOG" 2>&1
+
+          cat "$SESRUN_LOG"
+
+          DISPLAY_NUM="$(sed -ne 's/^ok.*display=\(:[0-9][0-9]*\).*/\1/p' "$SESRUN_LOG" | tail -n1)"
+          [ -n "$DISPLAY_NUM" ] || {
+            echo "xrdp-sesrun did not create an Xorg session."
+            cat "$SESRUN_LOG"
+            cat "$RUNNER_TEMP/xrdp-sesman.log" || true
+            exit 1
+          }
+
+          echo "XRDP_DISPLAY=$DISPLAY_NUM" >> "$GITHUB_ENV"
+
+          # Wait for Xorg and the XFCE session itself, not merely for port 3389.
+          for _ in $(seq 1 60); do
+            if [ -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ] && \
+               pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null 2>&1 && \
+               pgrep -u "$RDP_USER" -f 'xfce4-session|xfdesktop|xfwm4' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "=== GUI processes ==="
+          ps -eo user,pid,ppid,cmd | grep -E '[X]org|xfce4-session|xfdesktop|xfwm4|xfconfd' || true
+          echo "=== X11 sockets ==="
+          ls -l /tmp/.X11-unix/ || true
+          echo "=== xrdp session log ==="
+          tail -n 120 "$RUNNER_TEMP/xrdp-sesman.log" || true
+
+          [ -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ]
+          pgrep -u "$RDP_USER" -f '/usr/lib/Xorg :[0-9]+' >/dev/null
+          pgrep -u "$RDP_USER" -f 'xfce4-session|xfdesktop|xfwm4' >/dev/null
+
+          echo "XFCE desktop is UP on display $DISPLAY_NUM before RDP tunnel startup."
           echo "RDP is listening privately on 127.0.0.1:3389"
           echo "RDP user: $RDP_USER"
 
@@ -281,14 +346,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "[1/3] local relay health"
+          echo "[1/4] XFCE session"
+          [ -n "${XRDP_DISPLAY:-}" ]
+          [ -S "/tmp/.X11-unix/X${XRDP_DISPLAY#:}" ]
+          pgrep -u "$RDP_USER" -f 'xfce4-session|xfdesktop|xfwm4' >/dev/null
+          echo "XFCE is running on $XRDP_DISPLAY"
+
+          echo "[2/4] local relay health"
           curl -fsS http://127.0.0.1:8090/healthz | python3 -m json.tool
 
-          echo "[2/3] local RDP socket"
+          echo "[3/4] local RDP socket"
           (exec 3<>/dev/tcp/127.0.0.1/3389)
           echo "xrdp is reachable on 127.0.0.1:3389"
 
-          echo "[3/3] public health"
+          echo "[4/4] public health"
           PUBLIC_OK=0
           PUBLIC_HOST="${TERMINAL_URL#https://}"
           for _ in $(seq 1 30); do
