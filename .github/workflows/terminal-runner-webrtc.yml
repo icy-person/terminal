@@ -46,7 +46,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             python python-pip python-virtualenv \
-            nodejs npm git curl ca-certificates sudo \
+            nodejs npm git curl ca-certificates sudo pkgconf \
             ffmpeg \
             xorg-server-xvfb xorg-xauth xorg-xhost xorg-xdpyinfo \
             xfce4 xfce4-terminal dbus \
@@ -57,7 +57,16 @@ jobs:
 
           python -m venv /opt/webrtc-venv
           /opt/webrtc-venv/bin/pip install --upgrade pip wheel
-          /opt/webrtc-venv/bin/pip install -r runner/requirements-webrtc.txt
+          /opt/webrtc-venv/bin/pip install --only-binary=:all: -r runner/requirements-webrtc.txt
+
+          echo '=== WebRTC dependency preflight ==='
+          /opt/webrtc-venv/bin/python - <<'PY'
+          import av, aiortc, sys
+          print('Python:', sys.version)
+          print('PyAV:', av.__version__)
+          print('aiortc:', aiortc.__version__)
+          print('FFmpeg libraries:', av.library_versions)
+          PY
 
       - name: Start X11 + XFCE + PipeWire
         shell: bash
@@ -131,7 +140,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64 -o "$RUNNER_TEMP/cloudflared"
+          CLOUDFLARED_VERSION='2026.9.1'
+          CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          curl -fsSL "$CLOUDFLARED_URL" -o "$RUNNER_TEMP/cloudflared"
           chmod +x "$RUNNER_TEMP/cloudflared"
           "$RUNNER_TEMP/cloudflared" --version
 
