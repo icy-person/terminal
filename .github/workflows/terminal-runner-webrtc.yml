@@ -1,0 +1,157 @@
+name: GitHub Hosted WebRTC Game Stream (Arch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      fps:
+        description: Target capture FPS (30-45)
+        required: true
+        default: '45'
+        type: choice
+        options: ['30', '40', '45']
+      bitrate:
+        description: H.264 target bitrate in bits/s
+        required: true
+        default: '10000000'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-webrtc-stream
+  cancel-in-progress: true
+
+jobs:
+  stream:
+    name: Browser WebRTC stream (Arch + XFCE)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 350
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install desktop, FFmpeg and WebRTC dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            python python-pip python-virtualenv \
+            nodejs npm git curl ca-certificates sudo \
+            ffmpeg \
+            xorg-server-xvfb xorg-xauth xorg-xhost \
+            xfce4 xfce4-terminal dbus \
+            pipewire pipewire-pulse pipewire-alsa wireplumber \
+            alsa-utils pavucontrol \
+            mesa mesa-utils vulkan-icd-loader vulkan-tools vulkan-swrast \
+            libx11 libxtst
+
+          python -m venv /opt/webrtc-venv
+          /opt/webrtc-venv/bin/pip install --upgrade pip wheel
+          /opt/webrtc-venv/bin/pip install -r runner/requirements-webrtc.txt
+
+      - name: Start X11 + XFCE + PipeWire
+        shell: bash
+        run: |
+          set -euo pipefail
+          useradd -m -s /bin/bash streamuser
+          usermod -aG audio streamuser || true
+
+          export DISPLAY=:99
+          export XAUTHORITY=/tmp/webrtc.Xauthority
+          touch "$XAUTHORITY"
+          chmod 600 "$XAUTHORITY"
+
+          Xvfb "$DISPLAY" -screen 0 1920x1080x24 -ac +extension GLX +extension RANDR +extension MIT-SHM > "$RUNNER_TEMP/xvfb.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/xvfb.pid"
+          for _ in $(seq 1 30); do xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break; sleep 1; done
+          xdpyinfo -display "$DISPLAY" >/dev/null
+          xhost +local: >/dev/null
+
+          mkdir -p /run/user/1000
+          chown streamuser:streamuser /run/user/1000
+          chmod 700 /run/user/1000
+
+          runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR=/run/user/1000 \
+            bash -lc 'pipewire >/tmp/pipewire.log 2>&1 & pipewire-pulse >/tmp/pipewire-pulse.log 2>&1 & wireplumber >/tmp/wireplumber.log 2>&1 & sleep 2; dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 &'
+
+          for _ in $(seq 1 60); do
+            pgrep -u streamuser -x xfce4-session >/dev/null 2>&1 && pgrep -u streamuser -x xfwm4 >/dev/null 2>&1 && break
+            sleep 1
+          done
+          pgrep -u streamuser -x xfce4-session >/dev/null
+          pgrep -u streamuser -x xfwm4 >/dev/null
+
+          echo '=== DISPLAY ==='
+          echo "$DISPLAY"
+          echo '=== GUI ==='
+          ps -eo user,pid,ppid,cmd | grep -E '[X]vfb|[x]fce4-session|[x]fwm4|[p]ipewire|[w]ireplumber' || true
+
+      - name: Start WebRTC server
+        shell: bash
+        env:
+          WEBRTC_FPS: ${{ inputs.fps || '45' }}
+          WEBRTC_VIDEO_BITRATE: ${{ inputs.bitrate || '10000000' }}
+        run: |
+          set -euo pipefail
+          export DISPLAY=:99
+          export XAUTHORITY=/tmp/webrtc.Xauthority
+          export PULSE_SERVER=unix:/run/user/1000/pulse/native
+          export XDG_RUNTIME_DIR=/run/user/1000
+
+          nohup /opt/webrtc-venv/bin/python runner/webrtc_server.py > "$RUNNER_TEMP/webrtc.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/webrtc.pid"
+
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8092/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8092/healthz
+
+      - name: Start Cloudflare WebRTC signaling tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64 -o "$RUNNER_TEMP/cloudflared"
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" --version
+
+          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://127.0.0.1:8092 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared.pid"
+
+          URL=''
+          for _ in $(seq 1 90); do
+            URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          [ -n "$URL" ] || { cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
+
+          TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+          STREAM_WS="${URL/https:\/\//wss://}/webrtc"
+          STREAM_PAGE="https://icy-person.github.io/terminal/stream.html?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$STREAM_WS")&token=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$TOKEN")"
+
+          echo "[WebRTC] Stream page: $STREAM_PAGE"
+          echo "[WebRTC] Signaling: $STREAM_WS"
+          echo "[WebRTC] Target: $WEBRTC_FPS FPS / $WEBRTC_VIDEO_BITRATE bps"
+          echo '[WebRTC] Browser input: keyboard + mouse via DataChannel'
+          echo '[WebRTC] Audio: PipeWire/Pulse -> WebRTC'
+          echo '[WebRTC] Keep this job running while streaming.'
+
+      - name: Keep WebRTC runner alive
+        shell: bash
+        env:
+          IDLE_SECONDS: ${{ inputs.idle_seconds || '5' }}
+        run: |
+          set -euo pipefail
+          while true; do
+            echo "[$(date -Is)] WebRTC=$(curl -fsS http://127.0.0.1:8092/healthz || true)"
+            if [ -f "$RUNNER_TEMP/webrtc.log" ]; then tail -n 8 "$RUNNER_TEMP/webrtc.log" || true; fi
+            sleep "${IDLE_SECONDS:-5}"
+          done
