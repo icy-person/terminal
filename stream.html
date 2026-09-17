@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WebRTC Stream</title>
+  <style>
+    :root{color-scheme:dark}html,body{margin:0;width:100%;height:100%;background:#05070a;font-family:system-ui,sans-serif;overflow:hidden}main{width:100%;height:100%;display:grid;place-items:center}video{width:100%;height:100%;object-fit:contain;background:#000;cursor:crosshair}#status{position:fixed;left:14px;top:14px;padding:7px 10px;border-radius:9px;background:#111a;color:#fff;font:12px ui-monospace,monospace;backdrop-filter:blur(8px);z-index:2}#error{display:none;position:fixed;inset:auto 14px 14px 14px;padding:10px;border-radius:10px;background:#3a1111;color:#ffd7d7;font:13px system-ui;z-index:3;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+<main><video id="video" autoplay playsinline></video></main>
+<div id="status">connecting…</div><div id="error"></div>
+<script>
+const qs=new URLSearchParams(location.search), endpoint=qs.get('endpoint'), token=qs.get('token');
+const video=document.getElementById('video'),status=document.getElementById('status'),errorBox=document.getElementById('error');
+if(!endpoint||!token){status.textContent='missing stream endpoint';throw new Error('Missing endpoint/token');}
+let ws,pc,dc,lastMouse=0;
+const setStatus=s=>status.textContent=s;
+const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e)};
+function send(o){if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));}
+function codeKey(e,down){send({type:'key',code:e.code,key:e.key,down});}
+video.addEventListener('mousemove',e=>{const now=performance.now();if(now-lastMouse<8)return;lastMouse=now;const r=video.getBoundingClientRect();send({type:'mouse',x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,buttons:e.buttons});});
+video.addEventListener('mousedown',e=>{video.focus();send({type:'mouse',x:(e.clientX-video.getBoundingClientRect().left)/video.clientWidth,y:(e.clientY-video.getBoundingClientRect().top)/video.clientHeight,button:e.button+1,down:true,buttons:e.buttons});});
+video.addEventListener('mouseup',e=>{send({type:'button',button:e.button+1,down:false});});
+video.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
+window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();codeKey(e,true);});
+window.addEventListener('keyup',e=>{codeKey(e,false);});
+async function start(){
+  setStatus('creating peer connection…');
+  pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  pc.ontrack=e=>{if(e.track.kind==='video')video.srcObject=e.streams[0]||new MediaStream([e.track]);};
+  pc.onconnectionstatechange=()=>setStatus('WebRTC '+pc.connectionState);
+  pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE connection failed. A TURN relay may be required for the hosted runner network.');};
+  dc=pc.createDataChannel('input',{ordered:false,maxRetransmits:0});
+  dc.onopen=()=>setStatus('WebRTC connected');
+  pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});
+  const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+  for(let i=0;i<100&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
+  ws=new WebSocket(endpoint+'&token='+encodeURIComponent(token));
+  ws.onopen=()=>{setStatus('signaling connected');ws.send(JSON.stringify({type:'offer',sdp:pc.localDescription.sdp}));};
+  ws.onmessage=async e=>{const m=JSON.parse(e.data);if(m.type==='answer'){await pc.setRemoteDescription({type:'answer',sdp:m.sdp});}else if(m.type==='ready'){setStatus(`WebRTC ${m.width}×${m.height} @ ${m.fps} FPS`);}};
+  ws.onerror=()=>showError('WebSocket signaling failed.');ws.onclose=()=>{if(pc.connectionState!=='connected')setStatus('signaling closed');};
+}
+start().catch(showError);
+</script>
+</body></html>
