@@ -103,6 +103,9 @@ jobs:
         env:
           WEBRTC_FPS: ${{ inputs.fps || '45' }}
           WEBRTC_VIDEO_BITRATE: ${{ inputs.bitrate || '10000000' }}
+          WEBRTC_TURN_URL: ${{ secrets.WEBRTC_TURN_URL }}
+          WEBRTC_TURN_USERNAME: ${{ secrets.WEBRTC_TURN_USERNAME }}
+          WEBRTC_TURN_PASSWORD: ${{ secrets.WEBRTC_TURN_PASSWORD }}
         run: |
           set -euo pipefail
           TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
@@ -149,7 +152,12 @@ jobs:
           echo "[WebRTC] Stream page: $STREAM_PAGE"
           echo "[WebRTC] Signaling: $STREAM_WS"
           echo "[WebRTC] Target: $WEBRTC_FPS FPS / $WEBRTC_VIDEO_BITRATE bps"
-          echo '[WebRTC] Video: X11 -> WebRTC'
+          if [ -n "${WEBRTC_TURN_URL:-}" ] && [ -n "${WEBRTC_TURN_USERNAME:-}" ] && [ -n "${WEBRTC_TURN_PASSWORD:-}" ]; then
+            echo '[WebRTC] TURN relay: configured'
+          else
+            echo '[WebRTC] TURN relay: not configured; direct ICE/STUN will be attempted'
+          fi
+          echo '[WebRTC] Video: X11 -> H264 WebRTC'
           echo '[WebRTC] Audio: PipeWire/Pulse -> WebRTC'
           echo '[WebRTC] Input: keyboard + mouse -> DataChannel -> XTest'
 
