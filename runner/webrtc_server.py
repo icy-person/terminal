@@ -135,6 +135,15 @@ class InputBridge:
             self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
         self.display.sync()
 
+    def mouse_relative(self, dx, dy):
+        if not self.display:
+            return
+        q = self.display.screen().root.query_pointer()
+        px = max(0, min(self.width - 1, int(q.root_x + float(dx))))
+        py = max(0, min(self.height - 1, int(q.root_y + float(dy))))
+        self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
+        self.display.sync()
+
     def wheel(self, delta):
         if not self.display:
             return
@@ -158,16 +167,13 @@ async def health(_request):
 async def config(request):
     if request.query.get("token", "") != TOKEN:
         return web.json_response({"error": "unauthorized"}, status=401)
+    servers = [{"urls": STUN_URL}]
+    if turn_configured():
+        servers.append({"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_PASSWORD})
     return web.json_response({
-        "iceServers": [
-            {"urls": STUN_URL},
-            *([{"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_PASSWORD}] if turn_configured() else []),
-        ],
-        "fps": FPS,
-        "width": WIDTH,
-        "height": HEIGHT,
-        "bitrate": VIDEO_BITRATE,
-        "videoCodec": "H264",
+        "iceServers": servers,
+        "fps": FPS, "width": WIDTH, "height": HEIGHT,
+        "bitrate": VIDEO_BITRATE, "videoCodec": "H264",
     })
 
 
@@ -216,6 +222,8 @@ async def handle_offer(request):
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
                     elif kind in ("mouse", "button"):
                         input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0 if kind == "mouse" else 1)), bool(event.get("down")))
+                    elif kind == "mouse_rel":
+                        input_bridge.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
                     elif kind == "wheel":
                         input_bridge.wheel(float(event.get("delta", 0)))
                 except Exception as exc:
