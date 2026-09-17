@@ -74,6 +74,15 @@ function authorized(url, req = null) {
   return supplied.length === TOKEN.length && supplied === TOKEN;
 }
 
+function requestedWebSocketProtocols(req) {
+  const header = req.headers["sec-websocket-protocol"];
+  if (!header) return [];
+  return String(header)
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
 server.on("upgrade", (req, socket, head) => {
   metrics.upgrades++;
   let url;
@@ -116,8 +125,12 @@ server.on("upgrade", (req, socket, head) => {
 
 rdpWss.on("connection", (client, req) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const protocols = requestedWebSocketProtocols(req);
   const target = new URL(requestUrl.pathname + requestUrl.search, RDP_WS);
-  const upstream = new WebSocket(target, undefined, {
+
+  console.log(`RDP_WS_UPSTREAM_CONNECT path=${requestUrl.pathname} protocols=${protocols.join(",") || "none"}`);
+
+  const upstream = new WebSocket(target, protocols.length ? protocols : undefined, {
     perMessageDeflate: false,
     handshakeTimeout: 10000
   });
@@ -130,7 +143,7 @@ rdpWss.on("connection", (client, req) => {
     if (upstream.readyState <= WebSocket.OPEN) try { upstream.close(code, reason); } catch {}
   };
 
-  upstream.on("open", () => console.log(`RDP_WS_UPSTREAM_OPEN path=${requestUrl.pathname}`));
+  upstream.on("open", () => console.log(`RDP_WS_UPSTREAM_OPEN path=${requestUrl.pathname} protocol=${upstream.protocol || "none"}`));
   upstream.on("message", (data, isBinary) => {
     metrics.messagesUpstreamToClient++;
     metrics.bytesUpstreamToClient += data.length ?? Buffer.byteLength(String(data));
