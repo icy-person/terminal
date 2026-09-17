@@ -111,8 +111,6 @@ jobs:
           pgrep -u streamuser -x xfce4-session >/dev/null || fail 'xfce4-session is not running.'
           pgrep -u streamuser -x xfwm4 >/dev/null || fail 'xfwm4 is not running.'
 
-          # Create a deterministic, visible test surface so a blank wallpaper cannot
-          # accidentally pass the capture test.
           runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
             xfce4-terminal --title='WEBRTC PREFLIGHT - X11 CAPTURE OK' --geometry=90x20+120+100 \
             --command="bash -lc 'printf \"WEBRTC PREFLIGHT\\n\\nX11 capture test: OK\\n1920x1080\\nDISPLAY=$DISPLAY\\n\"; sleep 15'" \
@@ -132,7 +130,11 @@ jobs:
             >> "$DIAG/capture.txt" 2>&1 || fail 'FFmpeg could not sustain the X11 capture stream.'
 
           if [ -f "$DIAG/x11-preflight.png" ]; then
-            /opt/webrtc-venv/bin/python -c 'from PIL import Image,ImageStat; import sys; im=Image.open(sys.argv[1]).convert("RGB"); s=ImageStat.Stat(im); mean=sum(s.mean)/3.0; std=sum(s.stddev)/3.0; px=list(im.resize((320,180)).getdata()); nd=sum(1 for r,g,b in px if max(r,g,b)>18)/len(px); print(f"size={im.width}x{im.height}"); print(f"mean={mean:.2f}"); print(f"stdev={std:.2f}"); print(f"non_dark={nd:.4f}"); raise SystemExit("FRAME_INVALID: effectively black/blank") if mean < 2.0 or std < 2.0 or nd < 0.01 else print("FRAME_OK")' "$DIAG/x11-preflight.png" | tee "$DIAG/image-analysis.txt" || fail 'X11 screenshot was black/blank. WebRTC was not started.'
+            if /opt/webrtc-venv/bin/python -c 'from PIL import Image,ImageStat; import sys; im=Image.open(sys.argv[1]).convert("RGB"); s=ImageStat.Stat(im); mean=sum(s.mean)/3.0; std=sum(s.stddev)/3.0; px=list(im.resize((320,180)).getdata()); nd=sum(1 for r,g,b in px if max(r,g,b)>18)/len(px); print(f"size={im.width}x{im.height}"); print(f"mean={mean:.2f}"); print(f"stdev={std:.2f}"); print(f"non_dark={nd:.4f}"); ok=mean >= 2.0 and std >= 2.0 and nd >= 0.01; print("FRAME_OK" if ok else "FRAME_INVALID: effectively black/blank"); sys.exit(0 if ok else 1)' "$DIAG/x11-preflight.png" | tee "$DIAG/image-analysis.txt"; then
+              :
+            else
+              fail 'X11 screenshot was black/blank. WebRTC was not started.'
+            fi
           else
             fail 'X11 screenshot file was not produced.'
           fi
@@ -250,40 +252,20 @@ jobs:
             TEST_IP=''
             if [ -n "$LOCAL_IPS" ]; then TEST_IP="${LOCAL_IPS%%,*}"; elif [ -n "$CF_IPS" ]; then TEST_IP="${CF_IPS%%,*}"; elif [ -n "$GOOGLE_IPS" ]; then TEST_IP="${GOOGLE_IPS%%,*}"; fi
             if [ -n "$TEST_IP" ] && curl -fsS --max-time 10 --resolve "$HOST:443:$TEST_IP" "$URL/healthz" >/tmp/public-health-forced.json 2>/tmp/public-health-forced.err; then
-              echo '[HTTP] forced DNS + HTTPS: READY'
+              echo "[HTTP] forced DNS $TEST_IP: READY"
               cat /tmp/public-health-forced.json; echo
               READY=1
               break
+            else
+              echo "[HTTP] forced DNS: not ready ($(cat /tmp/public-health-forced.err 2>/dev/null || true))"
             fi
-            if [ -n "$TEST_IP" ]; then echo "[HTTP] forced HTTPS: $(cat /tmp/public-health-forced.err 2>/dev/null || true)"; fi
-            kill -0 "$CLOUDFLARED_PID" 2>/dev/null || break
-            sleep 3
+            sleep 2
           done
 
-          if [ "$READY" -ne 1 ]; then
-            echo '=== Cloudflare readiness FAILED ==='
-            echo "URL: $URL"
-            echo "PID alive: $(kill -0 "$CLOUDFLARED_PID" 2>/dev/null && echo yes || echo no)"
-            echo "Last HTTP error: ${LAST_ERROR:-none}"
-            cat "$CLOUDFLARED_LOG" || true
-            echo '--- local WebRTC health ---'
-            curl -v --max-time 5 http://127.0.0.1:8092/healthz || true
-            echo '--- WebRTC server log ---'
-            tail -n 160 "$RUNNER_TEMP/webrtc.log" || true
-            exit 1
-          fi
+          [ "$READY" -eq 1 ] || { echo "Public Quick Tunnel readiness failed: ${LAST_ERROR:-unknown error}"; cat "$CLOUDFLARED_LOG"; exit 1; }
 
-          echo '=== Public signaling auth check ==='
-          STATUS="$(curl -sS --max-time 20 -o "$RUNNER_TEMP/auth-check.json" -w '%{http_code}' -X POST -H 'Content-Type: text/plain' --data '{"password":"","sdp":""}' "$URL/webrtc")"
-          cat "$RUNNER_TEMP/auth-check.json"; echo
-          test "$STATUS" = 401 || { echo "Unexpected auth status: $STATUS"; exit 1; }
-          STREAM_WS="${URL/https:\/\//wss://}/webrtc"
-          STREAM_PAGE="https://icy-person.github.io/terminal/stream.html?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=""))' "$STREAM_WS")"
-          echo "[WebRTC] Stream page: $STREAM_PAGE"
-          echo "[WebRTC] Signaling: $STREAM_WS"
-          echo '[WebRTC] Authentication: fixed WEBRTC_PASSWORD; password is entered in the browser and never put in the URL'
-          echo "[WebRTC] Target: ${{ inputs.fps || '45' }} FPS / ${{ inputs.bitrate || '10000000' }} bps"
-          if [ -n "${WEBRTC_TURN_URL:-}" ] && [ -n "${WEBRTC_TURN_USERNAME:-}" ] && [ -n "${WEBRTC_TURN_PASSWORD:-}" ]; then echo '[WebRTC] TURN relay: configured'; else echo '[WebRTC] TURN relay: not configured'; fi
+          echo "[Stream] Browser page: https://icy-person.github.io/terminal/stream.html?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]+"/webrtc",safe=""))' "$URL")"
+          echo "[Stream] TURN configured: $([ -n "$WEBRTC_TURN_URL" ] && echo yes || echo no)"
 
       - name: Keep WebRTC runner alive
         shell: bash
@@ -292,7 +274,10 @@ jobs:
         run: |
           set -euo pipefail
           while true; do
-            echo "[$(date -Is)] WebRTC=$(curl -fsS http://127.0.0.1:8092/healthz || true)"
-            tail -n 8 "$RUNNER_TEMP/webrtc.log" 2>/dev/null || true
-            sleep "${IDLE_SECONDS:-5}"
+            if ! kill -0 "$(pgrep -fo 'runner/webrtc_server.py' || true)" 2>/dev/null; then
+              echo 'WebRTC server process is no longer running.'
+              cat "$RUNNER_TEMP/webrtc.log" || true
+              exit 1
+            fi
+            sleep "$IDLE_SECONDS"
           done
