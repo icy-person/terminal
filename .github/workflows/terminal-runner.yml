@@ -90,6 +90,47 @@ jobs:
           sed -i -E 's/^\s*KillDisconnected=.*/KillDisconnected=false/' /etc/xrdp/sesman.ini
           sed -i -E 's/^\s*Policy=.*/Policy=Default/' /etc/xrdp/sesman.ini
 
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          # Keep only the native Xorg connection section in xrdp.ini.
+          # Everything after [Xorg] is a selectable/proxy connection type;
+          # removing it prevents xrdp from ever offering Xvnc/libvnc.
+          p = Path('/etc/xrdp/xrdp.ini')
+          s = p.read_text()
+          m = re.search(r'^\[Xorg\]\n', s, re.M)
+          if not m:
+              raise SystemExit('xrdp.ini has no [Xorg] section')
+          tail = s[m.start():]
+          n = re.search(r'^\[[^\n]+\]\n', tail[len('[Xorg]\n'):], re.M)
+          if n:
+              tail = tail[:len('[Xorg]\n') + n.start()]
+          p.write_text(s[:m.start()] + tail.rstrip() + '\n')
+
+          # Remove the Xvnc display-server definition from sesman.ini while
+          # preserving [Chansrv] and the remaining session configuration.
+          p = Path('/etc/xrdp/sesman.ini')
+          s = p.read_text()
+          s = re.sub(r'^\[Xvnc\]\n.*?(?=^\[[^\n]+\]\n|\Z)', '', s, flags=re.M | re.S)
+          p.write_text(s)
+          PY
+
+          echo '=== Active xrdp connection sections ==='
+          grep -nE '^\[[^]]+\]$' /etc/xrdp/xrdp.ini
+          if grep -q '^\[Xvnc\]$' /etc/xrdp/xrdp.ini; then
+            echo 'Xvnc connection section is still enabled.'
+            exit 1
+          fi
+          if grep -q '^lib=libvnc\.so$' /etc/xrdp/xrdp.ini; then
+            echo 'libvnc.so is still active in xrdp.ini.'
+            exit 1
+          fi
+          grep -A8 '^\[Xorg\]$' /etc/xrdp/xrdp.ini
+          grep -q '^code=20$' /etc/xrdp/xrdp.ini || { echo 'Xorg code=20 is missing'; exit 1; }
+          grep -q '^lib=libxup\.so$' /etc/xrdp/xrdp.ini || { echo 'Xorg libxup.so is missing'; exit 1; }
+          grep -q '^\[Xvnc\]$' /etc/xrdp/sesman.ini && { echo 'Xvnc sesman backend is still enabled.'; exit 1; } || true
+
           curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 -o "$RUNNER_TEMP/ttyd"
           chmod +x "$RUNNER_TEMP/ttyd"
           "$RUNNER_TEMP/ttyd" --version
