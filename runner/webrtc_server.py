@@ -50,16 +50,24 @@ async def wait_ice_complete(pc):
 
 def make_video_player():
     return MediaPlayer(DISPLAY, format="x11grab", options={
-        "video_size": f"{WIDTH}x{HEIGHT}", "framerate": str(FPS), "draw_mouse": "0",
-        "fflags": "nobuffer", "flags": "low_delay", "probesize": "32", "analyzeduration": "0",
+        "video_size": f"{WIDTH}x{HEIGHT}",
+        "framerate": str(FPS),
+        "draw_mouse": "0",
+        "fflags": "nobuffer",
+        "flags": "low_delay",
+        "probesize": "32",
+        "analyzeduration": "0",
     }, decode=True)
 
 
 def make_audio_player():
     pulse = os.getenv("PULSE_SERVER", "")
     return MediaPlayer(pulse or "default", format="pulse", options={
-        "sample_rate": "48000", "channels": "2", "fflags": "nobuffer",
-        "probesize": "32", "analyzeduration": "0",
+        "sample_rate": "48000",
+        "channels": "2",
+        "fflags": "nobuffer",
+        "probesize": "32",
+        "analyzeduration": "0",
     }, decode=True)
 
 
@@ -83,30 +91,39 @@ class InputBridge:
             return 0
         names = {"Escape":"Escape", "Enter":"Return", "Tab":"Tab", "Backspace":"BackSpace", "Delete":"Delete", "Insert":"Insert", "Home":"Home", "End":"End", "PageUp":"Prior", "PageDown":"Next", "ArrowUp":"Up", "ArrowDown":"Down", "ArrowLeft":"Left", "ArrowRight":"Right", "Space":"space", "ShiftLeft":"Shift_L", "ShiftRight":"Shift_R", "ControlLeft":"Control_L", "ControlRight":"Control_R", "AltLeft":"Alt_L", "AltRight":"Alt_R", "MetaLeft":"Super_L", "MetaRight":"Super_R", "CapsLock":"Caps_Lock", "NumLock":"Num_Lock"}
         name = names.get(code)
-        if not name and code.startswith("Key") and len(code) == 4: name = code[-1].lower()
-        if not name and code.startswith("Digit") and len(code) == 6: name = code[-1]
-        if not name and code.startswith("F") and code[1:].isdigit(): name = code
-        if not name and len(key) == 1: name = key
-        if not name: return 0
+        if not name and code.startswith("Key") and len(code) == 4:
+            name = code[-1].lower()
+        if not name and code.startswith("Digit") and len(code) == 6:
+            name = code[-1]
+        if not name and code.startswith("F") and code[1:].isdigit():
+            name = code
+        if not name and len(key) == 1:
+            name = key
+        if not name:
+            return 0
         return self.display.keysym_to_keycode(self.XK.string_to_keysym(name))
 
     def key(self, code, key, down):
-        if not self.display: return
+        if not self.display:
+            return
         kc = self._keycode(code, key)
         if kc:
             self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
             self.display.sync()
 
     def mouse(self, x, y, button=0, down=False):
-        if not self.display: return
+        if not self.display:
+            return
         px = max(0, min(self.width - 1, round(float(x) * self.width)))
         py = max(0, min(self.height - 1, round(float(y) * self.height)))
         self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
-        if button: self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
+        if button:
+            self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
         self.display.sync()
 
     def mouse_relative(self, dx, dy):
-        if not self.display: return
+        if not self.display:
+            return
         q = self.display.screen().root.query_pointer()
         px = max(0, min(self.width - 1, int(q.root_x + float(dx))))
         py = max(0, min(self.height - 1, int(q.root_y + float(dy))))
@@ -114,7 +131,8 @@ class InputBridge:
         self.display.sync()
 
     def wheel(self, delta):
-        if not self.display: return
+        if not self.display:
+            return
         button = 4 if float(delta) < 0 else 5
         count = min(8, max(1, round(abs(float(delta)) / 40)))
         for _ in range(count):
@@ -124,11 +142,34 @@ class InputBridge:
 
 
 async def health(_request):
-    return web.json_response({"ok": True, "service": "terminal-webrtc", "display": DISPLAY, "width": WIDTH, "height": HEIGHT, "fps": FPS, "bitrate": VIDEO_BITRATE, "peers": len(pcs), "video_codec": "H264", "turn_configured": turn_configured(), "auth": "fixed-password"})
+    return web.json_response({
+        "ok": True,
+        "service": "terminal-webrtc",
+        "display": DISPLAY,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "fps": FPS,
+        "bitrate": VIDEO_BITRATE,
+        "peers": len(pcs),
+        "video_codecs": ["VP8", "H264"],
+        "turn_configured": turn_configured(),
+        "auth": "fixed-password",
+    })
 
 
 def cors_headers():
     return {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Cache-Control": "no-store"}
+
+
+def preferred_video_codecs():
+    codecs = RTCRtpSender.getCapabilities("video").codecs
+    # Prefer VP8 for maximum browser/aiortc interoperability. H264 remains available
+    # as the second choice. Forcing H264 alone can produce a connected-but-black
+    # Chromium surface when the negotiated H264 profile/encoder path disagrees.
+    vp8 = [c for c in codecs if c.mimeType.lower() == "video/vp8"]
+    h264 = [c for c in codecs if c.mimeType.lower() == "video/h264"]
+    rtx = [c for c in codecs if c.mimeType.lower() == "video/rtx"]
+    return vp8 + h264 + rtx
 
 
 async def handle_offer_post(request):
@@ -136,7 +177,6 @@ async def handle_offer_post(request):
     input_bridge = None
     video = audio = None
     try:
-        # Fixed password is carried in the text/plain JSON body. It is never placed in the URL.
         data = json.loads(await request.text())
         if data.get("password", "") != PASSWORD:
             return web.json_response({"error": "unauthorized"}, status=401, headers=cors_headers())
@@ -148,11 +188,16 @@ async def handle_offer_post(request):
         pcs.add(pc)
         input_bridge = InputBridge()
         video = make_video_player()
+        selected_codecs = preferred_video_codecs()
         if video.video:
             transceiver = pc.addTransceiver(video.video, direction="sendonly")
-            h264 = [c for c in RTCRtpSender.getCapabilities("video").codecs if c.mimeType.lower() == "video/h264"]
-            if h264: transceiver.setCodecPreferences(h264)
-            log.info("video capture started: %sx%s @ %s fps; H264 preference=%s", WIDTH, HEIGHT, FPS, bool(h264))
+            if selected_codecs:
+                transceiver.setCodecPreferences(selected_codecs)
+            log.info("video capture started: %sx%s @ %s fps; codec preference=%s", WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs])
+        else:
+            log.error("x11grab opened but did not expose a video track")
+            return web.json_response({"error": "X11 video capture produced no video track"}, status=500, headers=cors_headers())
+
         try:
             audio = make_audio_player()
             if audio.audio:
@@ -161,32 +206,65 @@ async def handle_offer_post(request):
         except Exception as exc:
             log.warning("audio capture unavailable: %s", exc)
 
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            log.info("peer connection state=%s", pc.connectionState)
+            if pc.connectionState in {"failed", "closed", "disconnected"}:
+                pcs.discard(pc)
+
         @pc.on("datachannel")
         def on_datachannel(channel):
             log.info("input channel opened: %s", channel.label)
             @channel.on("message")
             def on_message(message):
-                if not isinstance(message, str): return
+                if not isinstance(message, str):
+                    return
                 try:
-                    event, kind = json.loads(message), None
+                    event = json.loads(message)
                     kind = event.get("type")
-                    if kind == "key": input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
-                    elif kind in ("mouse", "button"): input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0 if kind == "mouse" else 1)), bool(event.get("down")))
-                    elif kind == "mouse_rel": input_bridge.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
-                    elif kind == "wheel": input_bridge.wheel(float(event.get("delta", 0)))
-                except Exception as exc: log.debug("input event failed: %s", exc)
+                    if kind == "key":
+                        input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
+                    elif kind in ("mouse", "button"):
+                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0 if kind == "mouse" else 1)), bool(event.get("down")))
+                    elif kind == "mouse_rel":
+                        input_bridge.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
+                    elif kind == "wheel":
+                        input_bridge.wheel(float(event.get("delta", 0)))
+                except Exception as exc:
+                    log.debug("input event failed: %s", exc)
 
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await wait_ice_complete(pc)
-        return web.json_response({"type": "answer", "sdp": pc.localDescription.sdp, "ready": {"width": WIDTH, "height": HEIGHT, "fps": FPS, "bitrate": VIDEO_BITRATE, "transport": "webrtc", "videoCodec": "H264", "turn": turn_configured()}}, headers=cors_headers())
+
+        negotiated = []
+        for section in pc.localDescription.sdp.split("m="):
+            if section.startswith("video "):
+                negotiated.append(section.split("\n", 1)[0])
+
+        return web.json_response({
+            "type": "answer",
+            "sdp": pc.localDescription.sdp,
+            "ready": {
+                "width": WIDTH,
+                "height": HEIGHT,
+                "fps": FPS,
+                "bitrate": VIDEO_BITRATE,
+                "transport": "webrtc",
+                "videoCodecs": [c.mimeType for c in selected_codecs],
+                "videoMLine": negotiated[0] if negotiated else "",
+                "turn": turn_configured(),
+            },
+        }, headers=cors_headers())
     except Exception as exc:
         log.exception("WebRTC HTTP signaling failed: %s", exc)
         if pc is not None:
             pcs.discard(pc)
-            if video: video.stop()
-            if audio: audio.stop()
+            if video:
+                video.stop()
+            if audio:
+                audio.stop()
             await pc.close()
         return web.json_response({"error": "WebRTC signaling failed", "detail": str(exc)}, status=500, headers=cors_headers())
 
