@@ -131,7 +131,8 @@ jobs:
           echo "WSTUNNEL_VERSION=$WSTUNNEL_VERSION" >> "$GITHUB_ENV"
 
           xrdp --version
-          Xorg -version 2>&1 | head -n 2
+          XORG_VERSION="$(Xorg -version 2>&1)"
+          printf '%s\n' "$XORG_VERSION"
 
       - name: Show Arch environment
         shell: bash
