@@ -13,7 +13,7 @@ log = logging.getLogger("terminal-webrtc")
 
 HOST = os.getenv("WEBRTC_HOST", "127.0.0.1")
 PORT = int(os.getenv("WEBRTC_PORT", "8092"))
-TOKEN = os.environ.get("TERMINAL_TOKEN", "")
+PASSWORD = os.environ.get("WEBRTC_PASSWORD", "")
 DISPLAY = os.getenv("DISPLAY", ":99")
 WIDTH = int(os.getenv("WEBRTC_WIDTH", "1920"))
 HEIGHT = int(os.getenv("WEBRTC_HEIGHT", "1080"))
@@ -24,8 +24,8 @@ TURN_URL = os.getenv("WEBRTC_TURN_URL", "")
 TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "")
 TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 
-if not TOKEN:
-    raise SystemExit("TERMINAL_TOKEN is required")
+if not PASSWORD:
+    raise SystemExit("WEBRTC_PASSWORD is required")
 
 pcs = set()
 
@@ -124,15 +124,7 @@ class InputBridge:
 
 
 async def health(_request):
-    return web.json_response({"ok": True, "service": "terminal-webrtc", "display": DISPLAY, "width": WIDTH, "height": HEIGHT, "fps": FPS, "bitrate": VIDEO_BITRATE, "peers": len(pcs), "video_codec": "H264", "turn_configured": turn_configured()})
-
-
-async def config(request):
-    if request.query.get("token", "") != TOKEN:
-        return web.json_response({"error": "unauthorized"}, status=401, headers={"Access-Control-Allow-Origin": "*"})
-    servers = [{"urls": STUN_URL}]
-    if turn_configured(): servers.append({"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_PASSWORD})
-    return web.json_response({"iceServers": servers, "fps": FPS, "width": WIDTH, "height": HEIGHT, "bitrate": VIDEO_BITRATE, "videoCodec": "H264"}, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
+    return web.json_response({"ok": True, "service": "terminal-webrtc", "display": DISPLAY, "width": WIDTH, "height": HEIGHT, "fps": FPS, "bitrate": VIDEO_BITRATE, "peers": len(pcs), "video_codec": "H264", "turn_configured": turn_configured(), "auth": "fixed-password"})
 
 
 def cors_headers():
@@ -140,18 +132,21 @@ def cors_headers():
 
 
 async def handle_offer_post(request):
-    if request.query.get("token", "") != TOKEN:
-        return web.json_response({"error": "unauthorized"}, status=401, headers=cors_headers())
-    pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers()))
-    pcs.add(pc)
-    input_bridge = InputBridge()
+    pc = None
+    input_bridge = None
     video = audio = None
     try:
-        # Parse the body ourselves so the browser can use text/plain and avoid a CORS preflight.
+        # Fixed password is carried in the text/plain JSON body. It is never placed in the URL.
         data = json.loads(await request.text())
+        if data.get("password", "") != PASSWORD:
+            return web.json_response({"error": "unauthorized"}, status=401, headers=cors_headers())
         sdp = data.get("sdp", "")
         if not sdp:
             return web.json_response({"error": "missing sdp"}, status=400, headers=cors_headers())
+
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers()))
+        pcs.add(pc)
+        input_bridge = InputBridge()
         video = make_video_player()
         if video.video:
             transceiver = pc.addTransceiver(video.video, direction="sendonly")
@@ -165,6 +160,7 @@ async def handle_offer_post(request):
                 log.info("audio capture started from %s", os.getenv("PULSE_SERVER", "default"))
         except Exception as exc:
             log.warning("audio capture unavailable: %s", exc)
+
         @pc.on("datachannel")
         def on_datachannel(channel):
             log.info("input channel opened: %s", channel.label)
@@ -179,6 +175,7 @@ async def handle_offer_post(request):
                     elif kind == "mouse_rel": input_bridge.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
                     elif kind == "wheel": input_bridge.wheel(float(event.get("delta", 0)))
                 except Exception as exc: log.debug("input event failed: %s", exc)
+
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
@@ -186,10 +183,11 @@ async def handle_offer_post(request):
         return web.json_response({"type": "answer", "sdp": pc.localDescription.sdp, "ready": {"width": WIDTH, "height": HEIGHT, "fps": FPS, "bitrate": VIDEO_BITRATE, "transport": "webrtc", "videoCodec": "H264", "turn": turn_configured()}}, headers=cors_headers())
     except Exception as exc:
         log.exception("WebRTC HTTP signaling failed: %s", exc)
-        pcs.discard(pc)
-        if video: video.stop()
-        if audio: audio.stop()
-        await pc.close()
+        if pc is not None:
+            pcs.discard(pc)
+            if video: video.stop()
+            if audio: audio.stop()
+            await pc.close()
         return web.json_response({"error": "WebRTC signaling failed", "detail": str(exc)}, status=500, headers=cors_headers())
 
 
@@ -204,7 +202,6 @@ async def on_shutdown(_app):
 
 app = web.Application()
 app.router.add_get("/healthz", health)
-app.router.add_get("/config", config)
 app.router.add_post("/webrtc", handle_offer_post)
 app.router.add_options("/webrtc", handle_offer_options)
 app.on_shutdown.append(on_shutdown)
