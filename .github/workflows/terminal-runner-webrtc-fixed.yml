@@ -10,7 +10,7 @@ on:
         type: choice
         options: ['30', '40', '45']
       bitrate:
-        description: H.264 target bitrate in bits/s
+        description: Target video bitrate in bits/s
         required: true
         default: '10000000'
         type: string
@@ -70,6 +70,130 @@ jobs:
           for _ in $(seq 1 60); do pgrep -u streamuser -x xfce4-session >/dev/null 2>&1 && pgrep -u streamuser -x xfwm4 >/dev/null 2>&1 && break; sleep 1; done
           pgrep -u streamuser -x xfce4-session >/dev/null
           pgrep -u streamuser -x xfwm4 >/dev/null
+
+      - name: Preflight X11 capture and desktop rendering
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DISPLAY=:99 XAUTHORITY=/tmp/webrtc.Xauthority
+          export XDG_RUNTIME_DIR="/run/user/$STREAM_UID"
+          export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
+          DIAG="$RUNNER_TEMP/webrtc-preflight"
+          mkdir -p "$DIAG"
+          FAIL=0
+
+          report() {
+            printf '%s\n' "$1" | tee -a "$DIAG/summary.txt"
+            printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+          }
+          fail() {
+            report "❌ $1"
+            FAIL=1
+          }
+
+          report '## WebRTC preflight'
+          report "Display: $DISPLAY"
+          report "Resolution: 1920x1080"
+
+          echo '=== X11 ===' | tee "$DIAG/x11.txt"
+          xdpyinfo -display "$DISPLAY" >> "$DIAG/x11.txt" 2>&1 || fail 'Xvfb/X11 is not responding.'
+          xwininfo -display "$DISPLAY" -root -tree >> "$DIAG/x11.txt" 2>&1 || fail 'X11 root window inspection failed.'
+
+          echo '=== XFCE processes ===' | tee -a "$DIAG/x11.txt"
+          pgrep -a -u streamuser -f 'xfce4-session|xfwm4|xfdesktop|xfsettingsd' >> "$DIAG/x11.txt" 2>&1 || true
+          pgrep -u streamuser -x xfce4-session >/dev/null || fail 'xfce4-session is not running.'
+          pgrep -u streamuser -x xfwm4 >/dev/null || fail 'xfwm4 is not running.'
+
+          # Put a known visible window on the desktop. This prevents a solid wallpaper
+          # from being mistaken for a healthy capture and gives us a deterministic
+          # non-black/non-static frame to validate.
+          runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            xfce4-terminal --title='WEBRTC PREFLIGHT - X11 CAPTURE OK' --geometry=90x20+120+100 \
+            --command="bash -lc 'printf \"WEBRTC PREFLIGHT\\n\\nX11 capture test: OK\\n1920x1080\\nDISPLAY=$DISPLAY\\n\"; sleep 15'" \
+            > "$DIAG/preflight-terminal.log" 2>&1 &
+          sleep 3
+
+          echo '=== X11 screenshot ===' | tee "$DIAG/capture.txt"
+          ffmpeg -hide_banner -loglevel error \
+            -f x11grab -video_size 1920x1080 -framerate 2 -draw_mouse 0 \
+            -i "$DISPLAY" -frames:v 1 -y "$DIAG/x11-preflight.png" \
+            >> "$DIAG/capture.txt" 2>&1 || fail 'FFmpeg could not capture a frame from X11.'
+
+          echo '=== X11 capture stream ===' | tee -a "$DIAG/capture.txt"
+          ffmpeg -hide_banner -loglevel error \
+            -f x11grab -video_size 1920x1080 -framerate 5 -draw_mouse 0 \
+            -i "$DISPLAY" -t 3 -f null - \
+            >> "$DIAG/capture.txt" 2>&1 || fail 'FFmpeg could not sustain the X11 capture stream.'
+
+          if [ -f "$DIAG/x11-preflight.png" ]; then
+            /opt/webrtc-venv/bin/python - "$DIAG/x11-preflight.png" <<'PY' | tee "$DIAG/image-analysis.txt"
+from PIL import Image, ImageStat
+import sys
+
+path = sys.argv[1]
+im = Image.open(path).convert("RGB")
+stat = ImageStat.Stat(im)
+mean = sum(stat.mean) / 3.0
+stdev = sum(stat.stddev) / 3.0
+pixels = list(im.resize((320, 180)).getdata())
+non_dark = sum(1 for r, g, b in pixels if max(r, g, b) > 18)
+non_gray = sum(1 for r, g, b in pixels if max(r, g, b) - min(r, g, b) > 12)
+print(f"size={im.width}x{im.height}")
+print(f"mean_luma_approx={mean:.2f}")
+print(f"stdev={stdev:.2f}")
+print(f"non_dark_fraction={non_dark/len(pixels):.4f}")
+print(f"non_gray_fraction={non_gray/len(pixels):.4f}")
+
+# The known XFCE terminal should make the frame visibly non-uniform.
+# Reject the classic all-black Xvfb/x11grab failure and nearly-static blank frames.
+if mean < 2.0 or stdev < 2.0 or non_dark/len(pixels) < 0.01:
+    raise SystemExit("FRAME_INVALID: captured frame is effectively black/blank")
+if stdev < 4.0 and non_gray/len(pixels) < 0.002:
+    raise SystemExit("FRAME_SUSPECT: captured frame has almost no visual variation")
+print("FRAME_OK")
+PY
+            ANALYSIS_STATUS=${PIPESTATUS[0]}
+            [ "$ANALYSIS_STATUS" -eq 0 ] || fail 'X11 screenshot was black/blank. The WebRTC layer is not the problem yet.'
+          else
+            fail 'X11 screenshot file was not produced.'
+          fi
+
+          echo '=== PipeWire ===' | tee "$DIAG/pipewire.txt"
+          wpctl status >> "$DIAG/pipewire.txt" 2>&1 || fail 'PipeWire/WirePlumber is not responding.'
+          pactl info >> "$DIAG/pipewire.txt" 2>&1 || true
+
+          echo '=== Graphics ===' | tee "$DIAG/graphics.txt"
+          ls -la /dev/dri >> "$DIAG/graphics.txt" 2>&1 || true
+          glxinfo -B >> "$DIAG/graphics.txt" 2>&1 || true
+          vulkaninfo --summary >> "$DIAG/graphics.txt" 2>&1 || true
+
+          echo '=== Versions ===' | tee "$DIAG/versions.txt"
+          ffmpeg -version | head -n 2 >> "$DIAG/versions.txt"
+          /opt/webrtc-venv/bin/python -c 'import av,aiortc; print("PyAV",av.__version__); print("aiortc",aiortc.__version__)' >> "$DIAG/versions.txt"
+
+          if [ "$FAIL" -ne 0 ]; then
+            report '### ❌ Preflight FAILED'
+            report 'The runner was stopped before WebRTC signaling. Download the `webrtc-preflight` artifact to see exactly which layer failed.'
+            echo '=== Preflight failure diagnostics ==='
+            cat "$DIAG/summary.txt" || true
+            echo '--- X11 ---'; cat "$DIAG/x11.txt" || true
+            echo '--- capture ---'; cat "$DIAG/capture.txt" || true
+            echo '--- image analysis ---'; cat "$DIAG/image-analysis.txt" || true
+            echo '--- pipewire ---'; cat "$DIAG/pipewire.txt" || true
+            exit 1
+          fi
+
+          report '### ✅ Preflight PASSED'
+          report 'X11, XFCE, x11grab, PipeWire and a non-blank desktop frame are healthy.'
+
+      - name: Upload preflight diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webrtc-preflight
+          path: ${{ runner.temp }}/webrtc-preflight/
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Start authenticated WebRTC server
         shell: bash
