@@ -31,7 +31,11 @@ window.addEventListener('keyup',e=>codeKey(e,false));
 video.addEventListener('dblclick',()=>{if(document.fullscreenElement)document.exitFullscreen();else video.requestFullscreen?.();});
 async function start(){
   setStatus('loading WebRTC configuration…');
-  const base=new URL(endpoint);base.pathname=base.pathname.replace(/\/webrtc$/,'/config');base.search='token='+encodeURIComponent(token);
+  const base=new URL(endpoint);
+  // The signaling endpoint is wss://, but /config is normal HTTPS. fetch() cannot use wss://.
+  base.protocol=base.protocol==='wss:'?'https:':base.protocol==='ws:'?'http:':base.protocol;
+  base.pathname=base.pathname.replace(/\/webrtc$/,'/config');
+  base.search='token='+encodeURIComponent(token);
   const cfg=await fetch(base,{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Configuration request failed: HTTP '+r.status);return r.json();});
   pc=new RTCPeerConnection({iceServers:cfg.iceServers||[]});
   pc.ontrack=e=>{if(e.track.kind==='video'){video.srcObject=e.streams[0]||new MediaStream([e.track]);video.play().catch(()=>{hint.textContent='Click video once to enable audio';});}else if(e.track.kind==='audio'){const s=video.srcObject||new MediaStream();s.addTrack(e.track);video.srcObject=s;video.play().catch(()=>{});}};
