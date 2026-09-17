@@ -106,7 +106,21 @@ jobs:
           n = re.search(r'^\[[^\n]+\]\n', tail[len('[Xorg]\n'):], re.M)
           if n:
               tail = tail[:len('[Xorg]\n') + n.start()]
-          p.write_text(s[:m.start()] + tail.rstrip() + '\n')
+
+          # xrdp's Xorg connection must explicitly provide an IP. Without it,
+          # libxup.so reaches the connection stage with an empty target and
+          # xrdp reports: "error - no ip set".
+          lines = tail.rstrip().splitlines()
+          if not lines or lines[0] != '[Xorg]':
+              raise SystemExit('invalid [Xorg] section')
+          lines = [line for line in lines if not re.match(r'^(ip|port|code)=', line)]
+          insert_at = len(lines)
+          lines[insert_at:insert_at] = [
+              'ip=127.0.0.1',
+              'port=-1',
+              'code=20',
+          ]
+          p.write_text(s[:m.start()] + '\n'.join(lines).rstrip() + '\n')
 
           # Remove the Xvnc display-server definition from sesman.ini while
           # preserving [Chansrv] and the remaining session configuration.
@@ -129,6 +143,8 @@ jobs:
           grep -A8 '^\[Xorg\]$' /etc/xrdp/xrdp.ini
           grep -q '^code=20$' /etc/xrdp/xrdp.ini || { echo 'Xorg code=20 is missing'; exit 1; }
           grep -q '^lib=libxup\.so$' /etc/xrdp/xrdp.ini || { echo 'Xorg libxup.so is missing'; exit 1; }
+          grep -q '^ip=127\.0\.0\.1$' /etc/xrdp/xrdp.ini || { echo 'Xorg ip=127.0.0.1 is missing'; exit 1; }
+          grep -q '^port=-1$' /etc/xrdp/xrdp.ini || { echo 'Xorg port=-1 is missing'; exit 1; }
           grep -q '^\[Xvnc\]$' /etc/xrdp/sesman.ini && { echo 'Xvnc sesman backend is still enabled.'; exit 1; } || true
 
           curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 -o "$RUNNER_TEMP/ttyd"
