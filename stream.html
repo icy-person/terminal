@@ -15,7 +15,7 @@
 const qs=new URLSearchParams(location.search), endpoint=qs.get('endpoint'), token=qs.get('token');
 const video=document.getElementById('video'),status=document.getElementById('status'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 if(!endpoint||!token){status.textContent='missing stream endpoint';throw new Error('Missing endpoint/token');}
-let ws,pc,dc,lastMouse=0,statsTimer;
+let pc,dc,lastMouse=0,statsTimer,answerReceived=false;
 const setStatus=s=>status.textContent=s;
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e)};
 function send(o){if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));}
@@ -30,25 +30,31 @@ window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8
 window.addEventListener('keyup',e=>codeKey(e,false));
 video.addEventListener('dblclick',()=>{if(document.fullscreenElement)document.exitFullscreen();else video.requestFullscreen?.();});
 async function start(){
-  setStatus('connecting to WebRTC signaling…');
-  // The signaling endpoint is a cross-origin WebSocket. Do not fetch /config here:
-  // the current deployment has no TURN relay, so a client-side STUN configuration
-  // is sufficient and avoids a CORS dependency on the ephemeral Cloudflare hostname.
+  setStatus('creating WebRTC offer…');
+  // Media is still peer-to-peer. Only SDP signaling crosses the Cloudflare Quick Tunnel.
+  // HTTP POST is used instead of a long-lived WebSocket because it is more reliable
+  // through ephemeral Cloudflare tunnels and needs no WebSocket upgrade handling.
   const iceServers=[{urls:'stun:stun.l.google.com:19302'}];
   pc=new RTCPeerConnection({iceServers});
   pc.ontrack=e=>{if(e.track.kind==='video'){video.srcObject=e.streams[0]||new MediaStream([e.track]);video.play().catch(()=>{hint.textContent='Click video once to enable audio';});}else if(e.track.kind==='audio'){const s=video.srcObject||new MediaStream();s.addTrack(e.track);video.srcObject=s;video.play().catch(()=>{});}};
-  pc.onconnectionstatechange=()=>setStatus('WebRTC '+pc.connectionState);
+  pc.onconnectionstatechange=()=>{setStatus('WebRTC '+pc.connectionState);};
   pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Configure TURN on the runner if direct P2P cannot connect.');};
   dc=pc.createDataChannel('input',{ordered:false,maxRetransmits:0});
   dc.onopen=()=>{setStatus('WebRTC connected · 1920×1080 @ 45 FPS');hint.textContent='Click video for pointer lock · double-click for fullscreen';};
   pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});
   const offer=await pc.createOffer();await pc.setLocalDescription(offer);
   for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
-  ws=new WebSocket(endpoint+'&token='+encodeURIComponent(token));
-  ws.onopen=()=>{setStatus('signaling connected');ws.send(JSON.stringify({type:'offer',sdp:pc.localDescription.sdp}));};
-  ws.onmessage=async e=>{const m=JSON.parse(e.data);if(m.type==='answer')await pc.setRemoteDescription({type:'answer',sdp:m.sdp});else if(m.type==='ready')setStatus(`WebRTC ${m.width}×${m.height} @ ${m.fps} FPS · ${m.videoCodec}`);};
-  ws.onerror=()=>showError('WebSocket signaling failed.');ws.onclose=()=>{if(pc.connectionState!=='connected')setStatus('signaling closed');};
-  statsTimer=setInterval(async()=>{if(!pc)return;for(const r of await pc.getStats()){if(r.type==='inbound-rtp'&&r.kind==='video'){const fps=Math.round(r.framesPerSecond||0);const lost=r.packetsLost||0;status.title=`received ${fps} FPS · lost ${lost}`;} }},1000);
+  setStatus('sending SDP offer…');
+  const signalUrl=endpoint.replace(/\/webrtc$/,'/webrtc')+'&token='+encodeURIComponent(token);
+  const response=await fetch(signalUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'offer',sdp:pc.localDescription.sdp}),cache:'no-store'});
+  if(!response.ok)throw new Error(`Signaling HTTP ${response.status}: ${await response.text()}`);
+  const answer=await response.json();
+  if(!answer.sdp)throw new Error(answer.error||'Signaling returned no SDP answer');
+  answerReceived=true;
+  await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});
+  const r=answer.ready||{};
+  setStatus(`WebRTC connecting · ${r.width||1920}×${r.height||1080} @ ${r.fps||45} FPS · ${r.videoCodec||'H264'}`);
+  statsTimer=setInterval(async()=>{if(!pc)return;for(const r of await pc.getStats()){if(r.type==='inbound-rtp'&&r.kind==='video'){const fps=Math.round(r.framesPerSecond||0);const lost=r.packetsLost||0;status.title=`received ${fps} FPS · lost ${lost}`;}}},1000);
 }
 start().catch(showError);
 </script>
