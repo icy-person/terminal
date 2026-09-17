@@ -65,7 +65,7 @@ jobs:
           su - aurbuilder -c "gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys 61ECEABBF2BB40E3A35DF30A9F72CDBC01BF10EB"
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xorgxrdp' && makepkg -si --noconfirm --needed --nocheck"
 
-          pacman -S --needed --noconfirm xfce4 xfce4-terminal dbus xorg xorg-xinit curl tar pipewire-jack
+          pacman -S --needed --noconfirm xfce4 xfce4-terminal dbus xorg xorg-xinit curl tar
 
           XRDP_USER=rdpuser
           useradd -m -s /bin/bash "$XRDP_USER"
