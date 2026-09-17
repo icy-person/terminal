@@ -138,6 +138,12 @@ jobs:
 
       - name: Start Cloudflare signaling tunnel
         shell: bash
+        env:
+          WEBRTC_FPS: ${{ inputs.fps || '45' }}
+          WEBRTC_VIDEO_BITRATE: ${{ inputs.bitrate || '10000000' }}
+          WEBRTC_TURN_URL: ${{ secrets.WEBRTC_TURN_URL }}
+          WEBRTC_TURN_USERNAME: ${{ secrets.WEBRTC_TURN_USERNAME }}
+          WEBRTC_TURN_PASSWORD: ${{ secrets.WEBRTC_TURN_PASSWORD }}
         run: |
           set -euo pipefail
           CLOUDFLARED_VERSION='2026.9.1'
