@@ -15,7 +15,7 @@
 const qs=new URLSearchParams(location.search), endpoint=qs.get('endpoint'), token=qs.get('token');
 const video=document.getElementById('video'),status=document.getElementById('status'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 if(!endpoint||!token){status.textContent='missing stream endpoint';throw new Error('Missing endpoint/token');}
-let pc,dc,lastMouse=0,statsTimer,answerReceived=false;
+let pc,dc,lastMouse=0,statsTimer;
 const setStatus=s=>status.textContent=s;
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e)};
 function send(o){if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));}
@@ -31,13 +31,12 @@ window.addEventListener('keyup',e=>codeKey(e,false));
 video.addEventListener('dblclick',()=>{if(document.fullscreenElement)document.exitFullscreen();else video.requestFullscreen?.();});
 async function start(){
   setStatus('creating WebRTC offer…');
-  // Media is still peer-to-peer. Only SDP signaling crosses the Cloudflare Quick Tunnel.
-  // HTTP POST is used instead of a long-lived WebSocket because it is more reliable
-  // through ephemeral Cloudflare tunnels and needs no WebSocket upgrade handling.
+  // Media remains peer-to-peer. Only SDP signaling crosses the Cloudflare Quick Tunnel.
+  // Use HTTP POST rather than WebSocket: it avoids WebSocket upgrade/close issues.
   const iceServers=[{urls:'stun:stun.l.google.com:19302'}];
   pc=new RTCPeerConnection({iceServers});
   pc.ontrack=e=>{if(e.track.kind==='video'){video.srcObject=e.streams[0]||new MediaStream([e.track]);video.play().catch(()=>{hint.textContent='Click video once to enable audio';});}else if(e.track.kind==='audio'){const s=video.srcObject||new MediaStream();s.addTrack(e.track);video.srcObject=s;video.play().catch(()=>{});}};
-  pc.onconnectionstatechange=()=>{setStatus('WebRTC '+pc.connectionState);};
+  pc.onconnectionstatechange=()=>setStatus('WebRTC '+pc.connectionState);
   pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Configure TURN on the runner if direct P2P cannot connect.');};
   dc=pc.createDataChannel('input',{ordered:false,maxRetransmits:0});
   dc.onopen=()=>{setStatus('WebRTC connected · 1920×1080 @ 45 FPS');hint.textContent='Click video for pointer lock · double-click for fullscreen';};
@@ -45,12 +44,12 @@ async function start(){
   const offer=await pc.createOffer();await pc.setLocalDescription(offer);
   for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
   setStatus('sending SDP offer…');
-  const signalUrl=endpoint.replace(/\/webrtc$/,'/webrtc')+'&token='+encodeURIComponent(token);
+  const base=endpoint.replace(/^wss:\/\//,'https://').replace(/^ws:\/\//,'http://');
+  const signalUrl=base.replace(/\/webrtc$/,'/webrtc')+'&token='+encodeURIComponent(token);
   const response=await fetch(signalUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'offer',sdp:pc.localDescription.sdp}),cache:'no-store'});
   if(!response.ok)throw new Error(`Signaling HTTP ${response.status}: ${await response.text()}`);
   const answer=await response.json();
   if(!answer.sdp)throw new Error(answer.error||'Signaling returned no SDP answer');
-  answerReceived=true;
   await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});
   const r=answer.ready||{};
   setStatus(`WebRTC connecting · ${r.width||1920}×${r.height||1080} @ ${r.fps||45} FPS · ${r.videoCodec||'H264'}`);
