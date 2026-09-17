@@ -30,19 +30,17 @@ window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8
 window.addEventListener('keyup',e=>codeKey(e,false));
 video.addEventListener('dblclick',()=>{if(document.fullscreenElement)document.exitFullscreen();else video.requestFullscreen?.();});
 async function start(){
-  setStatus('loading WebRTC configuration…');
-  const base=new URL(endpoint);
-  // The signaling endpoint is wss://, but /config is normal HTTPS. fetch() cannot use wss://.
-  base.protocol=base.protocol==='wss:'?'https:':base.protocol==='ws:'?'http:':base.protocol;
-  base.pathname=base.pathname.replace(/\/webrtc$/,'/config');
-  base.search='token='+encodeURIComponent(token);
-  const cfg=await fetch(base,{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Configuration request failed: HTTP '+r.status);return r.json();});
-  pc=new RTCPeerConnection({iceServers:cfg.iceServers||[]});
+  setStatus('connecting to WebRTC signaling…');
+  // The signaling endpoint is a cross-origin WebSocket. Do not fetch /config here:
+  // the current deployment has no TURN relay, so a client-side STUN configuration
+  // is sufficient and avoids a CORS dependency on the ephemeral Cloudflare hostname.
+  const iceServers=[{urls:'stun:stun.l.google.com:19302'}];
+  pc=new RTCPeerConnection({iceServers});
   pc.ontrack=e=>{if(e.track.kind==='video'){video.srcObject=e.streams[0]||new MediaStream([e.track]);video.play().catch(()=>{hint.textContent='Click video once to enable audio';});}else if(e.track.kind==='audio'){const s=video.srcObject||new MediaStream();s.addTrack(e.track);video.srcObject=s;video.play().catch(()=>{});}};
   pc.onconnectionstatechange=()=>setStatus('WebRTC '+pc.connectionState);
-  pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Configure WEBRTC_TURN_URL, WEBRTC_TURN_USERNAME and WEBRTC_TURN_PASSWORD repository secrets for a TURN relay.');};
+  pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Configure TURN on the runner if direct P2P cannot connect.');};
   dc=pc.createDataChannel('input',{ordered:false,maxRetransmits:0});
-  dc.onopen=()=>{setStatus(`WebRTC connected · ${cfg.width}×${cfg.height} @ ${cfg.fps} FPS`);hint.textContent='Click video for pointer lock · double-click for fullscreen';};
+  dc.onopen=()=>{setStatus('WebRTC connected · 1920×1080 @ 45 FPS');hint.textContent='Click video for pointer lock · double-click for fullscreen';};
   pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});
   const offer=await pc.createOffer();await pc.setLocalDescription(offer);
   for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
