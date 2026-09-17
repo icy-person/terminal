@@ -34,7 +34,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install base dependencies and audio provider
+      - name: Install base dependencies and PipeWire
         shell: bash
         run: |
           set -euo pipefail
@@ -44,7 +44,7 @@ jobs:
             pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber
           npm install --no-audit --no-fund --ignore-scripts
 
-      - name: Build and install RDP desktop stack
+      - name: Build and install RDP + PipeWire xrdp audio modules
         shell: bash
         env:
           XRDP_FIXED_PASSWORD: ${{ secrets.RDP_PASSWORD }}
@@ -57,16 +57,21 @@ jobs:
           printf '%s\n' 'aurbuilder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/aurbuilder
           chmod 440 /etc/sudoers.d/aurbuilder
 
-          rm -rf "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp"
+          rm -rf "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp" "$RUNNER_TEMP/aur-pipewire-module-xrdp"
           git clone --depth=1 https://aur.archlinux.org/xrdp.git "$RUNNER_TEMP/aur-xrdp"
           git clone --depth=1 https://aur.archlinux.org/xorgxrdp.git "$RUNNER_TEMP/aur-xorgxrdp"
-          chown -R aurbuilder:aurbuilder "$RUNNER_TEMP/aur-xrdp" "$RUNNER_TEMP/aur-xorgxrdp"
+          git clone --depth=1 https://aur.archlinux.org/pipewire-module-xrdp.git "$RUNNER_TEMP/aur-pipewire-module-xrdp"
+          chown -R aurbuilder:aurbuilder \
+            "$RUNNER_TEMP/aur-xrdp" \
+            "$RUNNER_TEMP/aur-xorgxrdp" \
+            "$RUNNER_TEMP/aur-pipewire-module-xrdp"
 
-          # pipewire-jack is already installed, so xrdp's virtual jack dependency
-          # resolves to PipeWire instead of jack2 and cannot create a later conflict.
+          # pipewire-jack is installed before xrdp so the xrdp JACK dependency
+          # resolves to PipeWire instead of pulling in jack2.
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xrdp' && makepkg -si --noconfirm --needed --nocheck"
           su - aurbuilder -c "gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys 61ECEABBF2BB40E3A35DF30A9F72CDBC01BF10EB"
           su - aurbuilder -c "cd '$RUNNER_TEMP/aur-xorgxrdp' && makepkg -si --noconfirm --needed --nocheck"
+          su - aurbuilder -c "cd '$RUNNER_TEMP/aur-pipewire-module-xrdp' && makepkg -si --noconfirm --needed --nocheck"
 
           pacman -S --needed --noconfirm \
             xfce4 xfce4-terminal dbus xorg xorg-xinit \
@@ -94,15 +99,25 @@ jobs:
           export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"
           export XDG_DATA_DIRS="/usr/local/share:/usr/share"
 
-          # xrdp-chansrv uses the PulseAudio protocol for RDP sound redirection.
-          # pipewire-pulse provides that protocol while PipeWire/WirePlumber provide
-          # the actual per-user audio server inside the non-systemd container.
+          # The hosted container has no systemd user manager, so start the
+          # per-user PipeWire stack explicitly inside the XFCE session.
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
+
           pipewire > /tmp/pipewire-rdpuser.log 2>&1 &
+          for _ in $(seq 1 20); do
+            [ -S "$XDG_RUNTIME_DIR/pipewire-0" ] && break
+            sleep 0.25
+          done
           pipewire-pulse > /tmp/pipewire-pulse-rdpuser.log 2>&1 &
           wireplumber > /tmp/wireplumber-rdpuser.log 2>&1 &
+
+          # pipewire-module-xrdp supplies the actual RDP audio sink/source.
+          # Loading it explicitly avoids relying on a desktop autostart manager.
+          if [ -x /usr/lib/pipewire-module-xrdp/load_pw_modules.sh ]; then
+            /usr/lib/pipewire-module-xrdp/load_pw_modules.sh > /tmp/pipewire-xrdp-modules.log 2>&1 || true
+          fi
 
           exec dbus-run-session -- startxfce4
           EOF
@@ -118,6 +133,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+
           p = Path('/etc/xrdp/xrdp.ini')
           s = p.read_text()
           m = re.search(r'^\[Xorg\]\n', s, re.M)
@@ -131,6 +147,7 @@ jobs:
           lines = [line for line in lines if not re.match(r'^(ip|port|code)=', line)]
           lines.extend(['ip=127.0.0.1', 'port=-1', 'code=20'])
           p.write_text(s[:m.start()] + '\n'.join(lines).rstrip() + '\n')
+
           p = Path('/etc/xrdp/sesman.ini')
           s = p.read_text()
           s = re.sub(r'^\[Xvnc\]\n.*?(?=^\[[^\n]+\]\n|\Z)', '', s, flags=re.M | re.S)
@@ -141,6 +158,7 @@ jobs:
           grep -q '^lib=libxup\.so$' /etc/xrdp/xrdp.ini
           grep -q '^ip=127\.0\.0\.1$' /etc/xrdp/xrdp.ini
           grep -q '^port=-1$' /etc/xrdp/xrdp.ini
+          test -f /usr/lib/pipewire-module-xrdp/load_pw_modules.sh
 
           curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 -o "$RUNNER_TEMP/ttyd"
           chmod +x "$RUNNER_TEMP/ttyd"
@@ -202,11 +220,11 @@ jobs:
           pgrep -u "$RDP_USER" -x xfwm4 >/dev/null
 
           echo '=== Audio ==='
-          runuser -u "$RDP_USER" -- bash -lc 'export XDG_RUNTIME_DIR=/run/user/$(id -u); pactl info || true; pactl list short sinks || true; pactl list short sources || true'
+          runuser -u "$RDP_USER" -- bash -lc 'export XDG_RUNTIME_DIR=/run/user/$(id -u); pactl info || true; pactl list short sinks || true; pactl list short sources || true; echo "--- xrdp module log ---"; cat /tmp/pipewire-xrdp-modules.log 2>/dev/null || true'
           echo '=== GUI ==='
           ps -eo user,pid,ppid,cmd | grep -E '[X]org|xfce4-session|xfwm4|pipewire|wireplumber' || true
 
-      - name: Start terminal and tunnels
+      - name: Start terminal and local RDP tunnel
         env:
           TERMINAL_SHELL: ${{ inputs.shell || 'bash' }}
         shell: bash
@@ -216,48 +234,84 @@ jobs:
           echo "TERMINAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
           export TERMINAL_TOKEN="$TOKEN"
           if [ "$TERMINAL_SHELL" = sh ]; then SHELL_CMD=/bin/sh; SHELL_ARGS=(); else SHELL_CMD=/bin/bash; SHELL_ARGS=(--login); fi
+
           nohup "$RUNNER_TEMP/ttyd" -W -p 7681 -i 127.0.0.1 -P 8 "$SHELL_CMD" "${SHELL_ARGS[@]}" > "$RUNNER_TEMP/ttyd.log" 2>&1 &
-          nohup "$RUNNER_TEMP/wstunnel" server --websocket-mask-frame --restrict-to 127.0.0.1:3389 ws://127.0.0.1:8091 > "$RUNNER_TEMP/wstunnel.log" 2>&1 &
-          export RDP_WS_URL=ws://127.0.0.1:8091
           nohup npm run relay > "$RUNNER_TEMP/relay.log" 2>&1 &
-          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1 && break; sleep 1; done
+          nohup "$RUNNER_TEMP/wstunnel" server --websocket-mask-frame --restrict-to 127.0.0.1:3389 ws://127.0.0.1:8091 > "$RUNNER_TEMP/wstunnel-rdp.log" 2>&1 &
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
           curl -fsS http://127.0.0.1:8090/healthz >/dev/null
-          nohup "$RUNNER_TEMP/wstunnel" client --websocket-mask-frame -L tcp://13389:127.0.0.1:3389 ws://127.0.0.1:8090 > "$RUNNER_TEMP/wstunnel-client-test.log" 2>&1 &
+
+          # Test the RDP tunnel directly. Do not send RDP through relay.mjs:
+          # the relay's Node WebSocket parser was rejecting frames as unmasked.
+          nohup "$RUNNER_TEMP/wstunnel" client --websocket-mask-frame \
+            -L tcp://13389:127.0.0.1:3389 ws://127.0.0.1:8091 \
+            > "$RUNNER_TEMP/wstunnel-client-test.log" 2>&1 &
           TEST_PID=$!
-          for _ in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/13389) >/dev/null 2>&1 && break; sleep 1; done
+          for _ in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/13389) >/dev/null 2>&1 && break
+            sleep 1
+          done
           (exec 3<>/dev/tcp/127.0.0.1/13389)
           kill "$TEST_PID" || true
 
-      - name: Start public Quick Tunnel
+      - name: Start separate public Quick Tunnels
         shell: bash
         run: |
           set -euo pipefail
-          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://127.0.0.1:8090 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
-          URL=''
-          for _ in $(seq 1 60); do URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n1 || true)"; [ -n "$URL" ] && break; sleep 2; done
-          [ -n "$URL" ] || { cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
+
+          # Terminal tunnel: browser -> relay.mjs -> ttyd.
+          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate \
+            --url http://127.0.0.1:8090 > "$RUNNER_TEMP/cloudflared-terminal.log" 2>&1 &
+
+          # RDP tunnel: browser/client -> Cloudflare -> wstunnel -> xrdp.
+          # Keeping RDP off relay.mjs avoids Node ws frame parsing entirely.
+          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate \
+            --url http://127.0.0.1:8091 > "$RUNNER_TEMP/cloudflared-rdp.log" 2>&1 &
+
+          TERMINAL_URL=''
+          RDP_URL=''
+          for _ in $(seq 1 90); do
+            TERMINAL_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared-terminal.log" | head -n1 || true)"
+            RDP_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared-rdp.log" | head -n1 || true)"
+            [ -n "$TERMINAL_URL" ] && [ -n "$RDP_URL" ] && break
+            sleep 2
+          done
+
+          [ -n "$TERMINAL_URL" ] || { cat "$RUNNER_TEMP/cloudflared-terminal.log"; exit 1; }
+          [ -n "$RDP_URL" ] || { cat "$RUNNER_TEMP/cloudflared-rdp.log"; exit 1; }
+
           TOKEN_QS="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$TERMINAL_TOKEN")"
-          WS_URL="${URL/https:\/\//wss://}/ws"
+          WS_URL="${TERMINAL_URL/https:\/\//wss://}/ws"
           ENDPOINT_URL="https://icy-person.github.io/terminal/?endpoint=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$WS_URL")&token=$TOKEN_QS"
-          RDP_WS_URL_PUBLIC="${URL/https:\/\//wss://}"
+          RDP_WS_URL_PUBLIC="${RDP_URL/https:\/\//wss://}"
           RDP_LOCAL_PORT=33890
           RDP_CLIENT_CMD="$RUNNER_TEMP/wstunnel client --websocket-mask-frame -L tcp://$RDP_LOCAL_PORT:127.0.0.1:3389 $RDP_WS_URL_PUBLIC"
+
           echo "TERMINAL_PAGES_URL=$ENDPOINT_URL" >> "$GITHUB_ENV"
           echo "RDP_WS_URL_PUBLIC=$RDP_WS_URL_PUBLIC" >> "$GITHUB_ENV"
           echo "RDP_LOCAL_PORT=$RDP_LOCAL_PORT" >> "$GITHUB_ENV"
+
           echo "Terminal: $ENDPOINT_URL"
           echo "RDP WebSocket: $RDP_WS_URL_PUBLIC"
           echo "RDP user: $RDP_USER"
           echo 'RDP password: fixed repository secret (RDP_PASSWORD)'
           echo "RDP local forward command: $RDP_CLIENT_CMD"
 
-      - name: Keep terminal and RDP alive
+      - name: Keep terminal, desktop, audio and tunnels alive
         shell: bash
         run: |
           set -euo pipefail
-          echo "Terminal: $TERMINAL_PAGES_URL"
-          echo "RDP WebSocket: $RDP_WS_URL_PUBLIC"
-          echo "RDP user: $RDP_USER"
-          echo 'RDP password: fixed repository secret (RDP_PASSWORD)'
-          echo "Run the printed wstunnel command locally, then connect RDP to 127.0.0.1:$RDP_LOCAL_PORT."
-          while true; do sleep "${{ inputs.idle_seconds || '5' }}"; done
+          while true; do
+            echo "[$(date -Is)] Terminal: $TERMINAL_PAGES_URL"
+            echo "[$(date -Is)] RDP WebSocket: $RDP_WS_URL_PUBLIC"
+            echo "[$(date -Is)] RDP user: $RDP_USER"
+            echo "[$(date -Is)] RDP password: fixed repository secret (RDP_PASSWORD)"
+            echo "[$(date -Is)] GUI: $(pgrep -u "$RDP_USER" -x xfce4-session >/dev/null 2>&1 && echo up || echo down)"
+            echo "[$(date -Is)] PipeWire: $(pgrep -u "$RDP_USER" -x pipewire >/dev/null 2>&1 && echo up || echo down)"
+            echo "[$(date -Is)] xrdp: $(pgrep -x xrdp >/dev/null 2>&1 && echo up || echo down)"
+            sleep "${{ inputs.idle_seconds || '5' }}"
+          done
