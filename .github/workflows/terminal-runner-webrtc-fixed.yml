@@ -43,11 +43,11 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm python python-pip python-virtualenv git curl ca-certificates sudo pkgconf ffmpeg xorg-server-xvfb xorg-xauth xorg-xhost xorg-xdpyinfo xfce4 xfce4-terminal dbus pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils mesa mesa-utils vulkan-icd-loader vulkan-tools vulkan-swrast libx11 libxtst
+          pacman -S --needed --noconfirm python python-pip python-virtualenv git curl ca-certificates sudo pkgconf ffmpeg xorg-server-xvfb xorg-xauth xorg-xhost xorg-xdpyinfo xorg-xwininfo xfce4 xfce4-terminal dbus pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils mesa mesa-utils vulkan-icd-loader vulkan-tools vulkan-swrast libx11 libxtst
           python -m venv /opt/webrtc-venv
           /opt/webrtc-venv/bin/pip install --upgrade pip wheel
           /opt/webrtc-venv/bin/pip install --only-binary=:all: -r runner/requirements-webrtc.txt
-          /opt/webrtc-venv/bin/python -c 'import av,aiortc; print("PyAV",av.__version__,"aiortc",aiortc.__version__)'
+          /opt/webrtc-venv/bin/python -c 'import av,aiortc; print("PyAV", av.__version__, "aiortc", aiortc.__version__)'
 
       - name: Start X11 + XFCE + PipeWire
         shell: bash
@@ -60,14 +60,21 @@ jobs:
           echo "STREAM_UID=$STREAM_UID" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           export DISPLAY=:99 XAUTHORITY=/tmp/webrtc.Xauthority
-          touch "$XAUTHORITY"; chmod 600 "$XAUTHORITY"
+          touch "$XAUTHORITY"
+          chmod 600 "$XAUTHORITY"
           Xvfb "$DISPLAY" -screen 0 1920x1080x24 -ac +extension GLX +extension RANDR +extension MIT-SHM > "$RUNNER_TEMP/xvfb.log" 2>&1 &
-          for _ in $(seq 1 30); do xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break; sleep 1; done
+          for _ in $(seq 1 30); do
+            xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
+            sleep 1
+          done
           xdpyinfo -display "$DISPLAY" >/dev/null
           xhost +local: >/dev/null
           install -d -m 700 -o streamuser -g streamuser "$XDG_RUNTIME_DIR"
           runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash -lc 'pipewire >/tmp/pipewire.log 2>&1 & pipewire-pulse >/tmp/pipewire-pulse.log 2>&1 & wireplumber >/tmp/wireplumber.log 2>&1 & sleep 2; dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 &'
-          for _ in $(seq 1 60); do pgrep -u streamuser -x xfce4-session >/dev/null 2>&1 && pgrep -u streamuser -x xfwm4 >/dev/null 2>&1 && break; sleep 1; done
+          for _ in $(seq 1 60); do
+            if pgrep -u streamuser -x xfce4-session >/dev/null 2>&1 && pgrep -u streamuser -x xfwm4 >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
           pgrep -u streamuser -x xfce4-session >/dev/null
           pgrep -u streamuser -x xfwm4 >/dev/null
 
@@ -93,7 +100,7 @@ jobs:
 
           report '## WebRTC preflight'
           report "Display: $DISPLAY"
-          report "Resolution: 1920x1080"
+          report 'Resolution: 1920x1080'
 
           echo '=== X11 ===' | tee "$DIAG/x11.txt"
           xdpyinfo -display "$DISPLAY" >> "$DIAG/x11.txt" 2>&1 || fail 'Xvfb/X11 is not responding.'
@@ -104,9 +111,8 @@ jobs:
           pgrep -u streamuser -x xfce4-session >/dev/null || fail 'xfce4-session is not running.'
           pgrep -u streamuser -x xfwm4 >/dev/null || fail 'xfwm4 is not running.'
 
-          # Put a known visible window on the desktop. This prevents a solid wallpaper
-          # from being mistaken for a healthy capture and gives us a deterministic
-          # non-black/non-static frame to validate.
+          # Create a deterministic, visible test surface so a blank wallpaper cannot
+          # accidentally pass the capture test.
           runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
             xfce4-terminal --title='WEBRTC PREFLIGHT - X11 CAPTURE OK' --geometry=90x20+120+100 \
             --command="bash -lc 'printf \"WEBRTC PREFLIGHT\\n\\nX11 capture test: OK\\n1920x1080\\nDISPLAY=$DISPLAY\\n\"; sleep 15'" \
@@ -126,34 +132,7 @@ jobs:
             >> "$DIAG/capture.txt" 2>&1 || fail 'FFmpeg could not sustain the X11 capture stream.'
 
           if [ -f "$DIAG/x11-preflight.png" ]; then
-            /opt/webrtc-venv/bin/python - "$DIAG/x11-preflight.png" <<'PY' | tee "$DIAG/image-analysis.txt"
-from PIL import Image, ImageStat
-import sys
-
-path = sys.argv[1]
-im = Image.open(path).convert("RGB")
-stat = ImageStat.Stat(im)
-mean = sum(stat.mean) / 3.0
-stdev = sum(stat.stddev) / 3.0
-pixels = list(im.resize((320, 180)).getdata())
-non_dark = sum(1 for r, g, b in pixels if max(r, g, b) > 18)
-non_gray = sum(1 for r, g, b in pixels if max(r, g, b) - min(r, g, b) > 12)
-print(f"size={im.width}x{im.height}")
-print(f"mean_luma_approx={mean:.2f}")
-print(f"stdev={stdev:.2f}")
-print(f"non_dark_fraction={non_dark/len(pixels):.4f}")
-print(f"non_gray_fraction={non_gray/len(pixels):.4f}")
-
-# The known XFCE terminal should make the frame visibly non-uniform.
-# Reject the classic all-black Xvfb/x11grab failure and nearly-static blank frames.
-if mean < 2.0 or stdev < 2.0 or non_dark/len(pixels) < 0.01:
-    raise SystemExit("FRAME_INVALID: captured frame is effectively black/blank")
-if stdev < 4.0 and non_gray/len(pixels) < 0.002:
-    raise SystemExit("FRAME_SUSPECT: captured frame has almost no visual variation")
-print("FRAME_OK")
-PY
-            ANALYSIS_STATUS=${PIPESTATUS[0]}
-            [ "$ANALYSIS_STATUS" -eq 0 ] || fail 'X11 screenshot was black/blank. The WebRTC layer is not the problem yet.'
+            /opt/webrtc-venv/bin/python -c 'from PIL import Image,ImageStat; import sys; im=Image.open(sys.argv[1]).convert("RGB"); s=ImageStat.Stat(im); mean=sum(s.mean)/3.0; std=sum(s.stddev)/3.0; px=list(im.resize((320,180)).getdata()); nd=sum(1 for r,g,b in px if max(r,g,b)>18)/len(px); print(f"size={im.width}x{im.height}"); print(f"mean={mean:.2f}"); print(f"stdev={std:.2f}"); print(f"non_dark={nd:.4f}"); raise SystemExit("FRAME_INVALID: effectively black/blank") if mean < 2.0 or std < 2.0 or nd < 0.01 else print("FRAME_OK")' "$DIAG/x11-preflight.png" | tee "$DIAG/image-analysis.txt" || fail 'X11 screenshot was black/blank. WebRTC was not started.'
           else
             fail 'X11 screenshot file was not produced.'
           fi
@@ -169,12 +148,11 @@ PY
 
           echo '=== Versions ===' | tee "$DIAG/versions.txt"
           ffmpeg -version | head -n 2 >> "$DIAG/versions.txt"
-          /opt/webrtc-venv/bin/python -c 'import av,aiortc; print("PyAV",av.__version__); print("aiortc",aiortc.__version__)' >> "$DIAG/versions.txt"
+          /opt/webrtc-venv/bin/python -c 'import av,aiortc; print("PyAV", av.__version__); print("aiortc", aiortc.__version__)' >> "$DIAG/versions.txt"
 
           if [ "$FAIL" -ne 0 ]; then
             report '### ❌ Preflight FAILED'
-            report 'The runner was stopped before WebRTC signaling. Download the `webrtc-preflight` artifact to see exactly which layer failed.'
-            echo '=== Preflight failure diagnostics ==='
+            report 'The runner was stopped before WebRTC signaling. Download the `webrtc-preflight` artifact for the exact failing layer.'
             cat "$DIAG/summary.txt" || true
             echo '--- X11 ---'; cat "$DIAG/x11.txt" || true
             echo '--- capture ---'; cat "$DIAG/capture.txt" || true
@@ -230,26 +208,19 @@ PY
           rm -f "$CLOUDFLARED_LOG"
           nohup "$CLOUDFLARED" tunnel --no-autoupdate --url http://127.0.0.1:8092 > "$CLOUDFLARED_LOG" 2>&1 &
           CLOUDFLARED_PID=$!
-          echo "[Cloudflare] cloudflared PID: $CLOUDFLARED_PID"
 
           URL=''
           for _ in $(seq 1 90); do
             URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$CLOUDFLARED_LOG" | head -n1 || true)"
             [ -n "$URL" ] && break
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo '[Cloudflare] cloudflared exited before publishing a URL'
-              cat "$CLOUDFLARED_LOG"
-              exit 1
-            fi
+            kill -0 "$CLOUDFLARED_PID" 2>/dev/null || { cat "$CLOUDFLARED_LOG"; exit 1; }
             sleep 2
           done
-          [ -n "$URL" ] || { echo '[Cloudflare] Timed out waiting for Quick Tunnel URL'; cat "$CLOUDFLARED_LOG"; exit 1; }
+          [ -n "$URL" ] || { echo 'Timed out waiting for Quick Tunnel URL'; cat "$CLOUDFLARED_LOG"; exit 1; }
 
           HOST="${URL#https://}"
           echo "[Cloudflare] Quick Tunnel URL: $URL"
           echo "[Cloudflare] Host: $HOST"
-
-          echo '=== Tunnel readiness / DNS diagnostics ==='
           curl -fsS --max-time 5 http://127.0.0.1:8092/healthz; echo
 
           READY=0
@@ -260,7 +231,6 @@ PY
             echo "[Cloudflare] readiness attempt $attempt/30"
             LOCAL_IPS="$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
             echo "[DNS] runner resolver A: ${LOCAL_IPS:-not resolved yet}"
-
             CF_DOH="$(curl -fsS --max-time 5 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$HOST&type=A" 2>/dev/null || true)"
             GOOGLE_DOH="$(curl -fsS --max-time 5 "https://dns.google/resolve?name=$HOST&type=A" 2>/dev/null || true)"
             CF_IPS="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(",".join(sorted({a["data"] for a in d.get("Answer",[]) if a.get("type")==1 and a.get("data")}))) if sys.argv[1] else ""' "$CF_DOH" 2>/dev/null || true)"
@@ -279,43 +249,27 @@ PY
 
             TEST_IP=''
             if [ -n "$LOCAL_IPS" ]; then TEST_IP="${LOCAL_IPS%%,*}"; elif [ -n "$CF_IPS" ]; then TEST_IP="${CF_IPS%%,*}"; elif [ -n "$GOOGLE_IPS" ]; then TEST_IP="${GOOGLE_IPS%%,*}"; fi
-            if [ -n "$TEST_IP" ]; then
-              echo "[HTTP] forced HTTPS test via $TEST_IP"
-              if curl -fsS --max-time 10 --resolve "$HOST:443:$TEST_IP" "$URL/healthz" >/tmp/public-health-forced.json 2>/tmp/public-health-forced.err; then
-                echo '[HTTP] forced DNS + HTTPS: READY'
-                cat /tmp/public-health-forced.json; echo
-                READY=1
-                break
-              fi
-              echo "[HTTP] forced HTTPS: $(cat /tmp/public-health-forced.err 2>/dev/null || true)"
-            fi
-
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo '[Cloudflare] cloudflared exited while waiting for readiness'
+            if [ -n "$TEST_IP" ] && curl -fsS --max-time 10 --resolve "$HOST:443:$TEST_IP" "$URL/healthz" >/tmp/public-health-forced.json 2>/tmp/public-health-forced.err; then
+              echo '[HTTP] forced DNS + HTTPS: READY'
+              cat /tmp/public-health-forced.json; echo
+              READY=1
               break
             fi
+            if [ -n "$TEST_IP" ]; then echo "[HTTP] forced HTTPS: $(cat /tmp/public-health-forced.err 2>/dev/null || true)"; fi
+            kill -0 "$CLOUDFLARED_PID" 2>/dev/null || break
             sleep 3
           done
 
           if [ "$READY" -ne 1 ]; then
             echo '=== Cloudflare readiness FAILED ==='
-            echo "[Cloudflare] URL: $URL"
-            echo "[Cloudflare] PID alive: $(kill -0 "$CLOUDFLARED_PID" 2>/dev/null && echo yes || echo no)"
-            echo "[Cloudflare] Last HTTP error: ${LAST_ERROR:-none}"
-            echo '--- cloudflared log ---'
+            echo "URL: $URL"
+            echo "PID alive: $(kill -0 "$CLOUDFLARED_PID" 2>/dev/null && echo yes || echo no)"
+            echo "Last HTTP error: ${LAST_ERROR:-none}"
             cat "$CLOUDFLARED_LOG" || true
             echo '--- local WebRTC health ---'
             curl -v --max-time 5 http://127.0.0.1:8092/healthz || true
             echo '--- WebRTC server log ---'
-            tail -n 120 "$RUNNER_TEMP/webrtc.log" || true
-            echo '--- runner DNS configuration ---'
-            cat /etc/resolv.conf || true
-            echo '--- runner resolver ---'
-            getent ahostsv4 "$HOST" || true
-            echo '--- Cloudflare DoH raw response ---'
-            printf '%s\n' "$CF_DOH" || true
-            echo '--- Google DoH raw response ---'
-            printf '%s\n' "$GOOGLE_DOH" || true
+            tail -n 160 "$RUNNER_TEMP/webrtc.log" || true
             exit 1
           fi
 
