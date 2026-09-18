@@ -34,13 +34,6 @@ vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
 
-# libvpx has a dedicated screen-content mode. aiortc does not expose it,
-# so enable it on the encoder without changing the WebRTC signaling API.
-_original_vp8_init = vpx.Vp8Encoder.__init__
-def _screen_vp8_init(self, *args, **kwargs):
-    _original_vp8_init(self, *args, **kwargs)
-    self.codec.options["screen-content-mode"] = "2"
-vpx.Vp8Encoder.__init__ = _screen_vp8_init
 
 pcs = set()
 
@@ -127,15 +120,20 @@ class InputBridge:
             self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
             self.display.sync()
 
-    def mouse(self, x, y, button=0, down=False):
+    def mouse(self, x, y):
         if not self.display:
             return
-        px = max(0, min(self.width - 1, round(float(x) * self.width)))
-        py = max(0, min(self.height - 1, round(float(y) * self.height)))
+        px = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
+        py = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
         self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
+        self.display.sync()
+
+    def button(self, button, down):
+        if not self.display:
+            return
         if button:
             self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
-        self.display.sync()
+            self.display.sync()
 
     def mouse_relative(self, dx, dy):
         if not self.display:
@@ -240,8 +238,10 @@ async def handle_offer_post(request):
                     kind = event.get("type")
                     if kind == "key":
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
-                    elif kind in ("mouse", "button"):
-                        input_bridge.mouse(float(event.get("x", 0)), float(event.get("y", 0)), int(event.get("button", 0 if kind == "mouse" else 1)), bool(event.get("down")))
+                    elif kind == "mouse":
+                        input_bridge.mouse(float(event.get("x", 0.5)), float(event.get("y", 0.5)))
+                    elif kind == "button":
+                        input_bridge.button(int(event.get("button", 1)), bool(event.get("down")))
                     elif kind == "mouse_rel":
                         input_bridge.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
                     elif kind == "wheel":
