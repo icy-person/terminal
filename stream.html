@@ -8,11 +8,11 @@
 :root{color-scheme:dark;--bg:#07090d;--panel:rgba(12,16,24,.78);--line:rgba(255,255,255,.1);--text:#eef2f7;--muted:#9aa6b5;--good:#57e389;--bad:#ff6b6b;--accent:#78a9ff}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text)}
 #root{position:fixed;inset:0;background:#000;display:grid;place-items:center}
-#surface{width:100%;height:100%;display:block;outline:0;touch-action:none;cursor:none;background:#000}
+#surface{display:none}
+#decoder{position:fixed;inset:0;width:100vw;height:100vh;display:block;object-fit:contain;outline:0;touch-action:none;cursor:none;background:#000;z-index:1}
 #remote-cursor{position:fixed;left:0;top:0;width:28px;height:32px;z-index:25;pointer-events:none;transform:translate(0,0);filter:drop-shadow(0 2px 3px #000b);display:none;will-change:left,top}
 #remote-cursor svg{width:28px;height:32px;display:block}
 #remote-cursor.clicking{transform:scale(.9);transform-origin:1px 1px}
-#decoder{position:fixed;left:-10000px;top:-10000px;width:2px;height:2px;opacity:.001;pointer-events:none}
 #hud{position:fixed;left:14px;right:14px;top:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;pointer-events:none;z-index:10;transition:opacity .25s}
 .panel{background:var(--panel);border:1px solid var(--line);box-shadow:0 12px 40px #0008;backdrop-filter:blur(16px);border-radius:12px;padding:8px 11px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 #state{display:flex;align-items:center;gap:8px}.dot{width:8px;height:8px;border-radius:50%;background:#888;box-shadow:0 0 12px currentColor}.ok{color:var(--good)}.bad{color:var(--bad)}
@@ -24,7 +24,7 @@ body:hover #toolbar,body:focus-within #toolbar{opacity:1}button{border:1px solid
 </head>
 <body>
 <div id="root"><canvas id="surface" tabindex="0"></canvas><div id="remote-cursor" aria-hidden="true"><svg viewBox="0 0 28 32" xmlns="http://www.w3.org/2000/svg"><path d="M2 1 L2 27 L9 20 L14 30 L18 28 L13 18 L24 18 Z" fill="#fff" stroke="#000" stroke-width="2" stroke-linejoin="round"/></svg></div></div>
-<video id="decoder" autoplay playsinline muted></video>
+<video id="decoder" autoplay playsinline muted tabindex="0"></video>
 <div id="hud"><div class="panel" id="state"><span class="dot"></span><span>Connecting…</span></div><div class="panel" id="stats">—</div></div>
 <div id="hint">Click the desktop to control it · Esc releases pointer lock</div>
 <div id="toolbar"><button id="pointer">🖱 Pointer</button><button id="fullscreen">⛶ Fullscreen</button><button id="mute">🔊 Audio</button><button id="fit">Fit</button><button id="reload">↻ Reconnect</button></div>
@@ -39,43 +39,43 @@ if(!endpoint){state.querySelector('span:last-child').textContent='Missing endpoi
 const setState=(text,kind='')=>{state.innerHTML=`<span class="dot ${kind}"></span><span>${text}</span>`};
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e);setState('Error','bad')};
 const send=o=>{const ch=(o.type==='mouse'||o.type==='mouse_rel')?pointerDc:dc;if(ch&&ch.readyState==='open')ch.send(JSON.stringify(o));};
-function resize(){canvas.width=Math.max(1,remoteW||decoder.videoWidth||1920);canvas.height=Math.max(1,remoteH||decoder.videoHeight||1080);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';draw();}
-function contentRect(){const r=canvas.getBoundingClientRect(),vw=remoteW||decoder.videoWidth||1920,vh=remoteH||decoder.videoHeight||1080;const scale=fitMode==='cover'?Math.max(r.width/vw,r.height/vh):Math.min(r.width/vw,r.height/vh);return{left:r.left+(r.width-vw*scale)/2,top:r.top+(r.height-vh*scale)/2,width:vw*scale,height:vh*scale,scale};}
-function draw(){if(!decoder.videoWidth||!decoder.videoHeight)return;const cw=canvas.width,ch=canvas.height;ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);ctx.imageSmoothingEnabled=false;let scale=fitMode==='cover'?Math.max(cw/decoder.videoWidth,ch/decoder.videoHeight):Math.min(cw/decoder.videoWidth,ch/decoder.videoHeight);const w=decoder.videoWidth*scale,h=decoder.videoHeight*scale;ctx.drawImage(decoder,(cw-w)/2,(ch-h)/2,w,h);}
-function loop(){if(!drawRunning)return;requestAnimationFrame(loop);if(decoder.readyState>=2&&decoder.currentTime!==lastFrame){lastFrame=decoder.currentTime;frames++;draw();}}
+function resize(){decoder.style.width='100vw';decoder.style.height='100vh';decoder.style.objectFit=fitMode==='cover'?'cover':'contain';renderCursor();}
+function contentRect(){const r=decoder.getBoundingClientRect(),vw=remoteW||decoder.videoWidth||1920,vh=remoteH||decoder.videoHeight||1080;const scale=fitMode==='cover'?Math.max(r.width/vw,r.height/vh):Math.min(r.width/vw,r.height/vh);return{left:r.left+(r.width-vw*scale)/2,top:r.top+(r.height-vh*scale)/2,width:vw*scale,height:vh*scale,scale};}
+function draw(){decoder.style.objectFit=fitMode==='cover'?'cover':'contain';}
+function loop(){}
 function coords(e){const q=contentRect();let x=(e.clientX-q.left)/q.width,y=(e.clientY-q.top)/q.height;return{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))};}
 function renderCursor(){const q=contentRect();remoteCursor.style.left=(q.left+lastPointer.x*q.width)+'px';remoteCursor.style.top=(q.top+lastPointer.y*q.height)+'px';remoteCursor.style.display='block';}
 function sendAbsolute(p){lastPointer={x:Math.max(0,Math.min(1,p.x)),y:Math.max(0,Math.min(1,p.y))};renderCursor();send({type:'mouse',x:lastPointer.x,y:lastPointer.y});}
 function sendButton(button,down){if(down)pressedButtons.add(button);else pressedButtons.delete(button);send({type:'button',button,down});}
 function flushMove(){moveQueued=false;if(!pendingMove)return;const m=pendingMove;pendingMove=null;lastPointer.x=Math.max(0,Math.min(1,lastPointer.x+m.dx/Math.max(1,remoteW)));lastPointer.y=Math.max(0,Math.min(1,lastPointer.y+m.dy/Math.max(1,remoteH)));renderCursor();send({type:'mouse_rel',dx:m.dx,dy:m.dy});}
 function queueMove(dx,dy){if(!pendingMove)pendingMove={dx:0,dy:0};pendingMove.dx+=dx;pendingMove.dy+=dy;if(!moveQueued){moveQueued=true;requestAnimationFrame(flushMove);}}
-canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
-canvas.addEventListener('mousemove',e=>{if(document.pointerLockElement===canvas)queueMove(e.movementX,e.movementY);else{const p=coords(e);sendAbsolute(p);}});
-canvas.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();canvas.focus();remoteCursor.classList.add('clicking');sendButton(e.button+1,true);});
-canvas.addEventListener('auxclick',e=>{e.preventDefault();e.stopPropagation();});
-canvas.addEventListener('mouseup',e=>{e.preventDefault();e.stopPropagation();remoteCursor.classList.remove('clicking');sendButton(e.button+1,false);});
-canvas.addEventListener('contextmenu',e=>{e.preventDefault();e.stopPropagation();});
-canvas.addEventListener('dragstart',e=>{e.preventDefault();e.stopPropagation();});
-canvas.addEventListener('selectstart',e=>{e.preventDefault();e.stopPropagation();});
-canvas.addEventListener('dblclick',e=>{e.preventDefault();e.stopPropagation();});
-document.addEventListener('click',e=>{if(e.target===canvas){e.preventDefault();e.stopPropagation();}},true);
-canvas.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
+decoder.addEventListener('click',async()=>{decoder.focus();hint.classList.add('hide');if(document.pointerLockElement!==decoder){try{await decoder.requestPointerLock()}catch{}}});
+decoder.addEventListener('mousemove',e=>{if(document.pointerLockElement===decoder)queueMove(e.movementX,e.movementY);else{const p=coords(e);sendAbsolute(p);}});
+decoder.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();decoder.focus();remoteCursor.classList.add('clicking');sendButton(e.button+1,true);});
+decoder.addEventListener('auxclick',e=>{e.preventDefault();e.stopPropagation();});
+decoder.addEventListener('mouseup',e=>{e.preventDefault();e.stopPropagation();remoteCursor.classList.remove('clicking');sendButton(e.button+1,false);});
+decoder.addEventListener('contextmenu',e=>{e.preventDefault();e.stopPropagation();});
+decoder.addEventListener('dragstart',e=>{e.preventDefault();e.stopPropagation();});
+decoder.addEventListener('selectstart',e=>{e.preventDefault();e.stopPropagation();});
+decoder.addEventListener('dblclick',e=>{e.preventDefault();e.stopPropagation();});
+document.addEventListener('click',e=>{if(e.target===decoder){e.preventDefault();e.stopPropagation();}},true);
+decoder.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
 window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();send({type:'key',code:e.code,key:e.key,down:true});});
 window.addEventListener('keyup',e=>send({type:'key',code:e.code,key:e.key,down:false}));
 window.addEventListener('resize',()=>{resize();renderCursor();});
 fullscreenBtn.onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();
-pointerBtn.onclick=()=>{canvas.focus();canvas.requestPointerLock?.();};
-fitBtn.onclick=()=>{fitMode=fitMode==='contain'?'cover':'contain';fitBtn.textContent=fitMode==='contain'?'Fit':'Fill';draw();};
+pointerBtn.onclick=()=>{decoder.focus();decoder.requestPointerLock?.();};
+fitBtn.onclick=()=>{fitMode=fitMode==='contain'?'cover':'contain';fitBtn.textContent=fitMode==='contain'?'Fit':'Fill';decoder.style.objectFit=fitMode==='cover'?'cover':'contain';renderCursor();};
 muteBtn.onclick=()=>{audioEnabled=!audioEnabled;decoder.muted=!audioEnabled;muteBtn.textContent=audioEnabled?'🔊 Audio':'🔇 Muted';if(audioEnabled)decoder.play().catch(()=>{});};
 reloadBtn.onclick=()=>location.reload();
-document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===canvas;pointerBtn.classList.toggle('active',locked);remoteCursor.style.display='block';if(locked)sendAbsolute(lastPointer);});
+document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===decoder;pointerBtn.classList.toggle('active',locked);remoteCursor.style.display='block';if(locked)renderCursor();});
 window.addEventListener('blur',()=>{for(const b of pressedButtons)sendButton(b,false);pressedButtons.clear();});
 setInterval(async()=>{if(!pc)return;try{const rs=await pc.getStats();let inbound=null;rs.forEach(r=>{if(r.type==='inbound-rtp'&&r.kind==='video')inbound=r});if(inbound){const now=performance.now(),dt=(now-lastStats)/1000;const fps=dt>0?(frames/dt):0;stats.textContent=`${remoteW}×${remoteH} · ${fps.toFixed(0)} fps · ${Math.round((inbound.bytesReceived||0)/1024)} KB`;frames=0;lastStats=now;}}catch{}},1000);
 async function start(){errorBox.style.display='none';const password=window.prompt('WebRTC password:');if(password===null){setState('Password required','bad');return;}setState('Creating connection…');
 pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
 pc.onconnectionstatechange=()=>{const s=pc.connectionState;setState('WebRTC '+s,s==='connected'?'ok':(s==='failed'?'bad':''));};
 pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Direct P2P could not connect. Configure TURN.');};
-pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;loop();setState('Video connected','ok');}else if(e.track.kind==='audio'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.muted=!audioEnabled;decoder.play().catch(()=>{hint.textContent='Click Audio once to enable sound'});}};
+pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;setState('Video connected','ok');decoder.style.objectFit=fitMode==='cover'?'cover':'contain';renderCursor();}else if(e.track.kind==='audio'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.muted=!audioEnabled;decoder.play().catch(()=>{hint.textContent='Click Audio once to enable sound'});}};
 dc=pc.createDataChannel('control',{ordered:true});pointerDc=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});
 dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),3500);};
 pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});await pc.setLocalDescription(await pc.createOffer());for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
