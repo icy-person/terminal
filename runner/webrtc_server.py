@@ -8,6 +8,7 @@ import subprocess
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
 from aiortc.contrib.media import MediaPlayer
+from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
 import aiortc.codecs.vpx as vpx
 import aiortc.codecs.h264 as h264
 
@@ -21,7 +22,7 @@ DISPLAY = os.getenv("DISPLAY", ":99")
 WIDTH = int(os.getenv("WEBRTC_WIDTH", "1920"))
 HEIGHT = int(os.getenv("WEBRTC_HEIGHT", "1080"))
 FPS = 30
-VIDEO_BITRATE = max(1_000_000, min(12_000_000, int(os.getenv("WEBRTC_VIDEO_BITRATE", "10000000"))))
+VIDEO_BITRATE = 6_000_000
 STUN_URL = os.getenv("WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
 TURN_URL = os.getenv("WEBRTC_TURN_URL", "")
 TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "")
@@ -30,15 +31,12 @@ TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 if not PASSWORD:
     raise SystemExit("WEBRTC_PASSWORD is required")
 
-# Lock the stream to 30 FPS and a predictable 6 Mbps budget for desktop content.
-VIDEO_BITRATE = 6_000_000
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
 h264.DEFAULT_BITRATE = VIDEO_BITRATE
 h264.MIN_BITRATE = VIDEO_BITRATE
 h264.MAX_BITRATE = VIDEO_BITRATE
-
 
 pcs = set()
 
@@ -62,8 +60,6 @@ async def wait_ice_complete(pc):
 
 
 def make_video_player():
-    # Keep x11grab conservative: the previous low-latency FFmpeg flags could
-    # make the live X11 demuxer stop advancing after its first frame.
     return MediaPlayer(DISPLAY, format="x11grab", options={
         "video_size": f"{WIDTH}x{HEIGHT}",
         "framerate": "30",
@@ -73,7 +69,6 @@ def make_video_player():
 
 
 def make_audio_player():
-    pulse = os.getenv("PULSE_SERVER", "")
     source = os.getenv("PULSE_SOURCE", "@DEFAULT_MONITOR@")
     return MediaPlayer(source, format="pulse", options={
         "sample_rate": "48000",
@@ -82,6 +77,59 @@ def make_audio_player():
         "probesize": "32",
         "analyzeduration": "0",
     }, decode=True)
+
+
+class LatestVideoTrack(MediaStreamTrack):
+    """Keep exactly one newest live-video frame and drop stale frames."""
+
+    kind = "video"
+
+    def __init__(self, source):
+        super().__init__()
+        self._source = source
+        self._latest = None
+        self._event = asyncio.Event()
+        self._task = asyncio.create_task(self._drain())
+
+    async def _drain(self):
+        try:
+            while True:
+                frame = await self._source.recv()
+                self._latest = frame
+                self._event.set()
+        except (MediaStreamError, asyncio.CancelledError):
+            pass
+        except Exception:
+            log.exception("video capture drain failed")
+        finally:
+            self._event.set()
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+
+        while self._latest is None:
+            await self._event.wait()
+            self._event.clear()
+            if self.readyState != "live" and self._latest is None:
+                raise MediaStreamError
+
+        frame = self._latest
+        self._latest = None
+        return frame
+
+    def stop(self):
+        if self.readyState == "ended":
+            return
+        super().stop()
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        if self._source is not None:
+            self._source.stop()
+            self._source = None
+        self._latest = None
+        self._event.set()
 
 
 class InputBridge:
@@ -165,10 +213,7 @@ class InputBridge:
         try:
             subprocess.run(
                 ["xclip", "-selection", "clipboard", "-in"],
-                input=str(text),
-                text=True,
-                check=True,
-                timeout=3,
+                input=str(text), text=True, check=True, timeout=3,
                 env={**os.environ, "DISPLAY": DISPLAY},
             )
             self.key("ControlLeft", "Control", True)
@@ -247,10 +292,6 @@ def cors_headers():
 
 def preferred_video_codecs():
     codecs = RTCRtpSender.getCapabilities("video").codecs
-    # The runner is CPU-only. At 1920x1080, software VP8/libvpx is a poor fit for
-    # a real-time desktop stream and can starve the capture/encoder pipeline.
-    # aiortc's H264Encoder uses libx264 with tune=zerolatency, so prefer H264 while
-    # retaining VP8 as a browser fallback.
     h264_codecs = [c for c in codecs if c.mimeType.lower() == "video/h264"]
     vp8 = [c for c in codecs if c.mimeType.lower() == "video/vp8"]
     rtx = [c for c in codecs if c.mimeType.lower() == "video/rtx"]
@@ -260,7 +301,7 @@ def preferred_video_codecs():
 async def handle_offer_post(request):
     pc = None
     input_bridge = None
-    video = audio = None
+    video = audio = latest_video = None
     try:
         data = json.loads(await request.text())
         if data.get("password", "") != PASSWORD:
@@ -273,21 +314,25 @@ async def handle_offer_post(request):
         pcs.add(pc)
         input_bridge = InputBridge()
         video = make_video_player()
-        selected_codecs = preferred_video_codecs()
-        if video.video:
-            transceiver = pc.addTransceiver(video.video, direction="sendonly")
-            if selected_codecs:
-                transceiver.setCodecPreferences(selected_codecs)
-            log.info("video capture started: %sx%s @ %s fps; codec preference=%s", WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs])
-        else:
+        if not video.video:
             log.error("x11grab opened but did not expose a video track")
             return web.json_response({"error": "X11 video capture produced no video track"}, status=500, headers=cors_headers())
+
+        latest_video = LatestVideoTrack(video.video)
+        selected_codecs = preferred_video_codecs()
+        transceiver = pc.addTransceiver(latest_video, direction="sendonly")
+        if selected_codecs:
+            transceiver.setCodecPreferences(selected_codecs)
+        log.info("video capture started: %sx%s @ %s fps; latest-frame mode; codec preference=%s",
+                 WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs])
 
         try:
             audio = make_audio_player()
             if audio.audio:
                 pc.addTrack(audio.audio)
-                log.info("audio capture started from %s", os.getenv("PULSE_SERVER", "default"))
+                log.info("audio capture started from %s source=%s",
+                         os.getenv("PULSE_SERVER", "default"),
+                         os.getenv("PULSE_SOURCE", "@DEFAULT_MONITOR@"))
         except Exception as exc:
             log.warning("audio capture unavailable: %s", exc)
 
@@ -296,7 +341,9 @@ async def handle_offer_post(request):
             log.info("peer connection state=%s", pc.connectionState)
             if pc.connectionState in {"failed", "closed"}:
                 pcs.discard(pc)
-                if video:
+                if latest_video:
+                    latest_video.stop()
+                elif video:
                     video.stop()
                 if audio:
                     audio.stop()
@@ -368,7 +415,9 @@ async def handle_offer_post(request):
         log.exception("WebRTC HTTP signaling failed: %s", exc)
         if pc is not None:
             pcs.discard(pc)
-            if video:
+            if latest_video:
+                latest_video.stop()
+            elif video:
                 video.stop()
             if audio:
                 audio.stop()
@@ -389,7 +438,6 @@ app = web.Application()
 app.router.add_get("/healthz", health)
 app.router.add_post("/webrtc", handle_offer_post)
 app.router.add_options("/webrtc", handle_offer_options)
-app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
     log.info("WebRTC server listening on %s:%s display=%s %sx%s@%s", HOST, PORT, DISPLAY, WIDTH, HEIGHT, FPS)
