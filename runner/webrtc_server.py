@@ -155,13 +155,19 @@ def stop_video_player(player):
 
 
 def make_audio_player():
-    source = os.getenv("PULSE_SOURCE", "@DEFAULT_MONITOR@")
+    """
+    Capture the desktop monitor as raw PCM.
+
+    Do not use the aggressive video-style nobuffer/probe settings here:
+    Pulse audio is a continuous live stream and starving its demuxer can
+    make the shared FFmpeg/PyAV worker stall, which in turn can make the
+    video appear frozen. Let FFmpeg/PyAV keep normal audio timing.
+    """
+    source = os.getenv("PULSE_SOURCE", "webrtc_sink.monitor")
     return MediaPlayer(source, format="pulse", options={
         "sample_rate": "48000",
         "channels": "2",
-        "fflags": "nobuffer",
-        "probesize": "32",
-        "analyzeduration": "0",
+        "thread_queue_size": "64",
     }, decode=True)
 
 
