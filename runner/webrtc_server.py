@@ -35,10 +35,10 @@ TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 if not PASSWORD:
     raise SystemExit("WEBRTC_PASSWORD is required")
 
-# Keep the encoder VBV buffer small (~250 ms): a large buffer smooths the
-# bitrate at the cost of end-to-end latency, which is wrong for an
-# interactive remote desktop.
-VBV_BUFFER = max(200_000, int(os.getenv("WEBRTC_VBV_BUFFER", "1500000")))
+# Keep the encoder VBV buffer at ~25% of the bitrate (~250 ms): a large
+# buffer lets keyframes burst far above the average bitrate, which shows up
+# as periodic packet-loss spikes on constrained paths, and it adds latency.
+VBV_BUFFER = int(os.getenv("WEBRTC_VBV_BUFFER", str(max(100_000, VIDEO_BITRATE // 4))))
 VIDEO_THREADS = max(2, min(4, int(os.getenv("WEBRTC_X264_THREADS", str(os.cpu_count() or 2)))))
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
