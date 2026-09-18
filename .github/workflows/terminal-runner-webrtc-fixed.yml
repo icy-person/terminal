@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       fps:
-        description: Fixed capture FPS (30)
+        description: Capture FPS — 30 for watching, 45-60 for gaming
         required: true
         default: '30'
         type: choice
-        options: ['30']
+        options: ['30', '45', '60']
       bitrate:
         description: Target video bitrate in bits/s
         required: true
@@ -29,6 +29,11 @@ on:
         required: true
         default: '5'
         type: string
+      runner:
+        description: Runner label — ubuntu-26.04 (GitHub-hosted) or self-hosted (your own VPS)
+        required: true
+        default: 'ubuntu-26.04'
+        type: string
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ concurrency:
 jobs:
   stream:
     name: Browser WebRTC stream (Arch + XFCE)
-    runs-on: ubuntu-26.04
+    runs-on: ${{ inputs.runner || 'ubuntu-26.04' }}
     timeout-minutes: 350
     container:
       image: archlinux:latest
@@ -225,7 +230,7 @@ jobs:
         shell: bash
         env:
           WEBRTC_PASSWORD: ${{ secrets.WEBRTC_PASSWORD }}
-          WEBRTC_FPS: '30'
+          WEBRTC_FPS: ${{ inputs.fps || '30' }}
           WEBRTC_VIDEO_BITRATE: ${{ inputs.bitrate || '6000000' }}
           WEBRTC_WIDTH: ${{ inputs.width || '1920' }}
           WEBRTC_HEIGHT: ${{ inputs.height || '1080' }}
