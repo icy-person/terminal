@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import subprocess
+import queue
+import threading
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
@@ -53,10 +55,11 @@ def ice_servers():
 
 
 async def wait_ice_complete(pc):
-    for _ in range(240):
+    for _ in range(80):
         if pc.iceGatheringState == "complete":
             return
         await asyncio.sleep(0.025)
+    log.warning("ICE gathering timeout; returning partial local description")
 
 
 def make_video_player():
@@ -102,6 +105,8 @@ def make_video_player():
         "-muxdelay", "0",
         "-muxpreload", "0",
         "-flush_packets", "1",
+        "-stats_period", "2",
+        "-progress", os.getenv("WEBRTC_VIDEO_PROGRESS", "/tmp/webrtc-video-progress.log"),
         "-f", "mpegts",
         "pipe:1",
     ]
@@ -109,7 +114,7 @@ def make_video_player():
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=open(os.getenv('WEBRTC_VIDEO_LOG', '/tmp/webrtc-video-ffmpeg.log'), 'ab', buffering=0),
         bufsize=0,
         env={**os.environ, "DISPLAY": DISPLAY},
     )
@@ -171,63 +176,10 @@ def make_audio_player():
     }, decode=True)
 
 
-class LatestVideoTrack(MediaStreamTrack):
-    """Keep exactly one newest encoded/decoded video unit and drop stale ones."""
-
-    kind = "video"
-
-    def __init__(self, source):
-        super().__init__()
-        self._source = source
-        self._latest = None
-        self._event = asyncio.Event()
-        self._task = asyncio.create_task(self._drain())
-
-    async def _drain(self):
-        try:
-            while True:
-                frame = await self._source.recv()
-                self._latest = frame
-                self._event.set()
-        except (MediaStreamError, asyncio.CancelledError):
-            pass
-        except Exception:
-            log.exception("video capture drain failed")
-        finally:
-            self._event.set()
-
-    async def recv(self):
-        if self.readyState != "live":
-            raise MediaStreamError
-
-        while self._latest is None:
-            await self._event.wait()
-            self._event.clear()
-            if self.readyState != "live" and self._latest is None:
-                raise MediaStreamError
-
-        frame = self._latest
-        self._latest = None
-        return frame
-
-    def stop(self):
-        if self.readyState == "ended":
-            return
-        super().stop()
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
-        if self._source is not None:
-            self._source.stop()
-            self._source = None
-        self._latest = None
-        self._event.set()
-
-
 class InputBridge:
-    """Inject browser keyboard/mouse events into the X11 desktop with XTest."""
+    """Low-level X11/XTest operations; called only from the input worker."""
     def __init__(self):
-        self.display = self.xtest = self.X = None
+        self.display = self.xtest = self.X = self.XK = None
         try:
             from Xlib import X, XK, display as xdisplay
             from Xlib.ext import xtest
@@ -235,6 +187,8 @@ class InputBridge:
             self.display, self.xtest = xdisplay.Display(DISPLAY), xtest
             screen = self.display.screen()
             self.width, self.height = screen.width_in_pixels, screen.height_in_pixels
+            q = screen.root.query_pointer()
+            self.mouse_x, self.mouse_y = q.root_x, q.root_y
             log.info("XTest input bridge ready: %s %sx%s", DISPLAY, self.width, self.height)
         except Exception as exc:
             log.warning("XTest input bridge unavailable: %s", exc)
@@ -243,27 +197,25 @@ class InputBridge:
         if not self.display:
             return 0
         names = {
-            "Escape":"Escape", "Enter":"Return", "Tab":"Tab", "Backspace":"BackSpace",
-            "Delete":"Delete", "Insert":"Insert", "Home":"Home", "End":"End",
-            "PageUp":"Prior", "PageDown":"Next", "ArrowUp":"Up", "ArrowDown":"Down",
-            "ArrowLeft":"Left", "ArrowRight":"Right", "Space":"space",
-            "ShiftLeft":"Shift_L", "ShiftRight":"Shift_R", "ControlLeft":"Control_L",
-            "ControlRight":"Control_R", "AltLeft":"Alt_L", "AltRight":"Alt_R",
-            "MetaLeft":"Super_L", "MetaRight":"Super_R", "CapsLock":"Caps_Lock",
-            "NumLock":"Num_Lock", "Minus":"minus", "Equal":"equal",
-            "BracketLeft":"bracketleft", "BracketRight":"bracketright",
-            "Backslash":"backslash", "Semicolon":"semicolon", "Quote":"apostrophe",
-            "Comma":"comma", "Period":"period", "Slash":"slash", "Backquote":"grave",
+            "Escape":"Escape","Enter":"Return","Tab":"Tab","Backspace":"BackSpace",
+            "Delete":"Delete","Insert":"Insert","Home":"Home","End":"End",
+            "PageUp":"Prior","PageDown":"Next","ArrowUp":"Up","ArrowDown":"Down",
+            "ArrowLeft":"Left","ArrowRight":"Right","Space":"space",
+            "ShiftLeft":"Shift_L","ShiftRight":"Shift_R","ControlLeft":"Control_L",
+            "ControlRight":"Control_R","AltLeft":"Alt_L","AltRight":"Alt_R",
+            "MetaLeft":"Super_L","MetaRight":"Super_R","CapsLock":"Caps_Lock",
+            "NumLock":"Num_Lock","Minus":"minus","Equal":"equal",
+            "BracketLeft":"bracketleft","BracketRight":"bracketright",
+            "Backslash":"backslash","Semicolon":"semicolon","Quote":"apostrophe",
+            "Comma":"comma","Period":"period","Slash":"slash","Backquote":"grave",
+            "NumpadAdd":"KP_Add","NumpadSubtract":"KP_Subtract","NumpadMultiply":"KP_Multiply",
+            "NumpadDivide":"KP_Divide","NumpadDecimal":"KP_Decimal","NumpadEnter":"KP_Enter",
         }
         name = names.get(code)
         if not name and code.startswith("Key") and len(code) == 4:
             name = code[-1].lower()
         if not name and code.startswith("Digit") and len(code) == 6:
             name = code[-1]
-        if not name and code.startswith("Numpad"):
-            name = {"NumpadAdd":"KP_Add", "NumpadSubtract":"KP_Subtract",
-                    "NumpadMultiply":"KP_Multiply", "NumpadDivide":"KP_Divide",
-                    "NumpadDecimal":"KP_Decimal", "NumpadEnter":"KP_Enter"}.get(code)
         if not name and code.startswith("F") and code[1:].isdigit():
             name = code
         if not name and len(key) == 1:
@@ -281,75 +233,48 @@ class InputBridge:
         kc = self._keycode(code, key)
         if kc:
             self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
-            self.display.sync()
 
-    def text(self, text):
-        if not self.display or not text:
-            return
-        try:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard", "-in"],
-                input=str(text), text=True, check=True, timeout=3,
-                env={**os.environ, "DISPLAY": DISPLAY},
-            )
-            self.key("ControlLeft", "Control", True)
-            self.key("KeyV", "v", True)
-            self.key("KeyV", "v", False)
-            self.key("ControlLeft", "Control", False)
-        except Exception as exc:
-            log.warning("unicode text injection failed: %s", exc)
+    def _paste_text(self, text):
+        subprocess.run(
+            ["xclip", "-selection", "clipboard", "-in"],
+            input=str(text), text=True, check=True, timeout=3,
+            env={**os.environ, "DISPLAY": DISPLAY},
+        )
+        self.key("ControlLeft", "Control", True)
+        self.key("KeyV", "v", True)
+        self.key("KeyV", "v", False)
+        self.key("ControlLeft", "Control", False)
 
     def paste(self, text):
-        if not self.display or text is None:
-            return
-        try:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard", "-in"],
-                input=str(text), text=True, check=True, timeout=3,
-                env={**os.environ, "DISPLAY": DISPLAY},
-            )
-            self.key("ControlLeft", "Control", True)
-            self.key("KeyV", "v", True)
-            self.key("KeyV", "v", False)
-            self.key("ControlLeft", "Control", False)
-        except Exception as exc:
-            log.warning("clipboard paste failed: %s", exc)
+        if self.display and text is not None:
+            self._paste_text(text)
 
     def clipboard(self):
         if not self.display:
             return ""
-        try:
-            return subprocess.run(
-                ["xclip", "-selection", "clipboard", "-out"],
-                capture_output=True, text=True, check=True, timeout=2,
-                env={**os.environ, "DISPLAY": DISPLAY},
-            ).stdout
-        except Exception:
-            return ""
+        return subprocess.run(
+            ["xclip", "-selection", "clipboard", "-out"],
+            capture_output=True, text=True, check=True, timeout=2,
+            env={**os.environ, "DISPLAY": DISPLAY},
+        ).stdout
 
-    def mouse(self, x, y):
+    def mouse_absolute(self, x, y):
         if not self.display:
             return
-        px = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
-        py = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
-        self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
-        self.display.sync()
-
-    def button(self, button, down):
-        if not self.display:
-            return
-        if button:
-            self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
-            self.display.sync()
+        self.mouse_x = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
+        self.mouse_y = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
+        self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
 
     def mouse_relative(self, dx, dy):
         if not self.display:
             return
-        q = self.display.screen().root.query_pointer()
-        px = max(0, min(self.width - 1, int(q.root_x + float(dx))))
-        py = max(0, min(self.height - 1, int(q.root_y + float(dy))))
-        self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
-        self.display.sync()
+        self.mouse_x = max(0, min(self.width - 1, int(self.mouse_x + float(dx))))
+        self.mouse_y = max(0, min(self.height - 1, int(self.mouse_y + float(dy))))
+        self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
+
+    def button(self, button, down):
+        if self.display and button:
+            self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
 
     def wheel(self, delta):
         if not self.display:
@@ -359,7 +284,117 @@ class InputBridge:
         for _ in range(count):
             self.xtest.fake_input(self.display, self.X.ButtonPress, button)
             self.xtest.fake_input(self.display, self.X.ButtonRelease, button)
-        self.display.sync()
+
+    def sync(self):
+        if self.display:
+            self.display.sync()
+
+
+class InputWorker:
+    """Run blocking X11/xclip work off the aiortc event loop."""
+    def __init__(self, loop):
+        self.loop = loop
+        self.bridge = InputBridge()
+        self.queue = queue.Queue(maxsize=512)
+        self.running = True
+        self.pending_dx = 0.0
+        self.pending_dy = 0.0
+        self.pending_absolute = None
+        self.thread = threading.Thread(target=self._run, name="x11-input", daemon=True)
+        self.thread.start()
+
+    def _put(self, event):
+        try:
+            self.queue.put_nowait(event)
+        except queue.Full:
+            if event[0] == "mouse_rel":
+                self.pending_dx += float(event[1])
+                self.pending_dy += float(event[2])
+            elif event[0] == "mouse":
+                self.pending_absolute = (float(event[1]), float(event[2]))
+            else:
+                log.warning("input queue full; dropping %s", event[0])
+
+    def key(self, code, key, down): self._put(("key", code, key, down))
+    def paste(self, text): self._put(("paste", text))
+    def clipboard(self, channel): self._put(("clipboard", channel))
+    def mouse(self, x, y): self._put(("mouse", x, y))
+    def mouse_relative(self, dx, dy): self._put(("mouse_rel", dx, dy))
+    def button(self, button, down): self._put(("button", button, down))
+    def wheel(self, delta): self._put(("wheel", delta))
+
+    def _flush_pointer(self):
+        changed = False
+        if self.pending_absolute is not None:
+            x, y = self.pending_absolute
+            self.pending_absolute = None
+            self.bridge.mouse_absolute(x, y)
+            changed = True
+        if self.pending_dx or self.pending_dy:
+            dx, dy = self.pending_dx, self.pending_dy
+            self.pending_dx = self.pending_dy = 0.0
+            self.bridge.mouse_relative(dx, dy)
+            changed = True
+        if changed:
+            self.bridge.sync()
+
+    def _run(self):
+        while self.running:
+            try:
+                event = self.queue.get(timeout=0.008)
+            except queue.Empty:
+                self._flush_pointer()
+                continue
+            try:
+                kind = event[0]
+                if kind == "mouse_rel":
+                    self.pending_dx += float(event[1])
+                    self.pending_dy += float(event[2])
+                elif kind == "mouse":
+                    self.pending_absolute = (float(event[1]), float(event[2]))
+                elif kind == "stop":
+                    break
+                else:
+                    self._flush_pointer()
+                    if kind == "key":
+                        self.bridge.key(event[1], event[2], event[3])
+                    elif kind == "button":
+                        self.bridge.button(event[1], event[2])
+                    elif kind == "wheel":
+                        self.bridge.wheel(event[1])
+                    elif kind == "paste":
+                        self.bridge.paste(event[1])
+                    elif kind == "clipboard":
+                        text = self.bridge.clipboard()
+                        if text and event[1].readyState == "open":
+                            self.loop.call_soon_threadsafe(self._send_clipboard, event[1], text)
+                    self.bridge.sync()
+            except Exception as exc:
+                log.debug("input worker event failed: %s", exc)
+            finally:
+                self.queue.task_done()
+        self._flush_pointer()
+
+    def _send_clipboard(self, channel, text):
+        try:
+            if channel.readyState == "open":
+                channel.send(json.dumps({"type": "clipboard", "text": text}))
+        except Exception:
+            pass
+
+    def stop(self):
+        self.running = False
+        try:
+            self.queue.put_nowait(("stop",))
+        except queue.Full:
+            pass
+        if self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        try:
+            if self.bridge.display:
+                self.bridge.display.close()
+        except Exception:
+            pass
 
 
 async def health(_request):
@@ -392,8 +427,8 @@ def preferred_video_codecs():
 
 async def handle_offer_post(request):
     pc = None
-    input_bridge = None
-    video = audio = latest_video = None
+    input_worker = None
+    video = audio = None
     try:
         data = json.loads(await request.text())
         if data.get("password", "") != PASSWORD:
@@ -404,7 +439,7 @@ async def handle_offer_post(request):
 
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers()))
         pcs.add(pc)
-        input_bridge = InputBridge()
+        input_worker = InputWorker(asyncio.get_running_loop())
         video = make_video_player()
         if not video.video:
             log.error("x11grab opened but did not expose a video track")
@@ -443,6 +478,8 @@ async def handle_offer_post(request):
                     stop_video_player(video)
                 if audio:
                     audio.stop()
+                if input_worker:
+                    input_worker.stop()
                 if pc.connectionState != "closed":
                     await pc.close()
             elif pc.connectionState == "disconnected":
@@ -463,23 +500,21 @@ async def handle_offer_post(request):
                     event = json.loads(message)
                     kind = event.get("type")
                     if kind == "key":
-                        input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
+                        input_worker.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
                     elif kind == "text":
                         input_bridge.text(str(event.get("text", "")))
                     elif kind == "paste":
-                        input_bridge.paste(str(event.get("text", "")))
+                        input_worker.paste(str(event.get("text", "")))
                     elif kind == "clipboard-copy":
-                        text = input_bridge.clipboard()
-                        if text and channel.readyState == "open":
-                            channel.send(json.dumps({"type": "clipboard", "text": text}))
+                        input_worker.clipboard(channel)
                     elif kind == "mouse":
-                        input_bridge.mouse(float(event.get("x", 0.5)), float(event.get("y", 0.5)))
+                        input_worker.mouse(float(event.get("x", 0.5)), float(event.get("y", 0.5)))
                     elif kind == "button":
-                        input_bridge.button(int(event.get("button", 1)), bool(event.get("down")))
+                        input_worker.button(int(event.get("button", 1)), bool(event.get("down")))
                     elif kind == "mouse_rel":
-                        input_bridge.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
+                        input_worker.mouse_relative(float(event.get("dx", 0)), float(event.get("dy", 0)))
                     elif kind == "wheel":
-                        input_bridge.wheel(float(event.get("delta", 0)))
+                        input_worker.wheel(float(event.get("delta", 0)))
                 except Exception as exc:
                     log.debug("input event failed: %s", exc)
 
@@ -515,6 +550,8 @@ async def handle_offer_post(request):
                 stop_video_player(video)
             if audio:
                 audio.stop()
+            if input_worker:
+                input_worker.stop()
             await pc.close()
         return web.json_response({"error": "WebRTC signaling failed", "detail": str(exc)}, status=500, headers=cors_headers())
 
