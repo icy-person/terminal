@@ -73,6 +73,12 @@ async function handleClipboardPaste(e){
     setTimeout(()=>hint.classList.add('hide'),3500);
   }
 }
+let composing=false;
+window.addEventListener('compositionstart',()=>{composing=true;});
+window.addEventListener('compositionend',e=>{
+  composing=false;
+  if(e.data && dc?.readyState==='open')dc.send(JSON.stringify({type:'text',text:e.data}));
+});
 window.addEventListener('keydown',e=>{
   const ctrl=e.ctrlKey||e.metaKey;
   if(ctrl && e.code==='KeyV'){
@@ -84,13 +90,26 @@ window.addEventListener('keydown',e=>{
     e.stopPropagation();
     send({type:'key',code:e.code,key:e.key,down:true});
     setTimeout(()=>send({type:'key',code:e.code,key:e.key,down:false}),0);
-    setTimeout(()=>send({type:'clipboard-copy'}),120);
+    // Give the X11 application time to update its CLIPBOARD selection, then
+    // return the remote clipboard to the browser.
+    for(const delay of [120,220,400,650])setTimeout(()=>send({type:'clipboard-copy'}),delay);
+    return;
+  }
+  if(composing || e.isComposing)return;
+  // Non-ASCII committed characters (Persian/Arabic/CJK/emoji/etc.) must not
+  // depend on the remote XKB layout. Send the actual Unicode text instead.
+  if(!ctrl && !e.altKey && e.key && e.key.length===1 && e.key.charCodeAt(0)>127){
+    e.preventDefault();
+    if(dc?.readyState==='open')dc.send(JSON.stringify({type:'text',text:e.key}));
     return;
   }
   if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();
   send({type:'key',code:e.code,key:e.key,down:true});
 });
-window.addEventListener('keyup',e=>send({type:'key',code:e.code,key:e.key,down:false}));
+window.addEventListener('keyup',e=>{
+  if(composing || e.isComposing)return;
+  send({type:'key',code:e.code,key:e.key,down:false});
+});
 window.addEventListener('resize',()=>{resize();renderCursor();});
 fullscreenBtn.onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();
 pointerBtn.onclick=()=>{decoder.focus();decoder.requestPointerLock?.();};
