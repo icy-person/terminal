@@ -25,6 +25,7 @@ body:hover #toolbar,body:focus-within #toolbar{opacity:1}button{border:1px solid
 <body>
 <div id="root"><canvas id="surface" tabindex="0"></canvas></div>
 <video id="decoder" autoplay playsinline muted tabindex="0"></video>
+<audio id="remote-audio" autoplay playsinline></audio>
 <div id="remote-cursor" aria-hidden="true"><svg viewBox="0 0 28 32" xmlns="http://www.w3.org/2000/svg"><path d="M2 1 L2 27 L9 20 L14 30 L18 28 L13 18 L24 18 Z" fill="#fff" stroke="#000" stroke-width="2" stroke-linejoin="round"/></svg></div>
 <div id="hud"><div class="panel" id="state"><span class="dot"></span><span>Connecting…</span></div><div class="panel" id="stats">—</div></div>
 <div id="hint">Click the desktop to control it · Esc releases pointer lock</div>
@@ -33,7 +34,7 @@ body:hover #toolbar,body:focus-within #toolbar{opacity:1}button{border:1px solid
 <script>
 const qs=new URLSearchParams(location.search),endpoint=qs.get('endpoint');
 const canvas=document.getElementById('surface'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
-const decoder=document.getElementById('decoder'),state=document.getElementById('state'),stats=document.getElementById('stats'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
+const decoder=document.getElementById('decoder'),remoteAudio=document.getElementById('remote-audio'),state=document.getElementById('state'),stats=document.getElementById('stats'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 const pointerBtn=document.getElementById('pointer'),fullscreenBtn=document.getElementById('fullscreen'),muteBtn=document.getElementById('mute'),fitBtn=document.getElementById('fit'),reloadBtn=document.getElementById('reload'),remoteCursor=document.getElementById('remote-cursor');
 let pc=null,dc=null,pointerDc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),lastDecoded=null,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true,lastPointer={x:.5,y:.5},pendingMove=null,moveQueued=false,pressedButtons=new Set();
 if(!endpoint){state.querySelector('span:last-child').textContent='Missing endpoint';throw new Error('Missing endpoint');}
@@ -114,7 +115,7 @@ window.addEventListener('resize',()=>{resize();renderCursor();});
 fullscreenBtn.onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();
 pointerBtn.onclick=()=>{decoder.focus();decoder.requestPointerLock?.();};
 fitBtn.onclick=()=>{fitMode=fitMode==='contain'?'cover':'contain';fitBtn.textContent=fitMode==='contain'?'Fit':'Fill';decoder.style.objectFit=fitMode==='cover'?'cover':'contain';renderCursor();};
-muteBtn.onclick=()=>{audioEnabled=!audioEnabled;decoder.muted=!audioEnabled;muteBtn.textContent=audioEnabled?'🔊 Audio':'🔇 Muted';if(audioEnabled)decoder.play().catch(()=>{});};
+muteBtn.onclick=()=>{audioEnabled=!audioEnabled;remoteAudio.muted=!audioEnabled;muteBtn.textContent=audioEnabled?'🔊 Audio':'🔇 Muted';if(audioEnabled)remoteAudio.play().catch(()=>{hint.textContent='Click Audio once to enable sound';hint.classList.remove('hide');});};
 reloadBtn.onclick=()=>location.reload();
 document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===decoder;pointerBtn.classList.toggle('active',locked);remoteCursor.style.display='block';if(locked)renderCursor();});
 window.addEventListener('blur',()=>{for(const b of pressedButtons)sendButton(b,false);pressedButtons.clear();});
@@ -123,7 +124,7 @@ async function start(){errorBox.style.display='none';const password=window.promp
 pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
 pc.onconnectionstatechange=()=>{const s=pc.connectionState;setState('WebRTC '+s,s==='connected'?'ok':(s==='failed'?'bad':''));};
 pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Direct P2P could not connect. Configure TURN.');};
-pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;setState('Video connected','ok');decoder.style.objectFit=fitMode==='cover'?'cover':'contain';requestAnimationFrame(renderCursor);setTimeout(renderCursor,100);setTimeout(renderCursor,500);}else if(e.track.kind==='audio'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.muted=!audioEnabled;decoder.play().catch(()=>{hint.textContent='Click Audio once to enable sound'});}};
+pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;setState('Video connected','ok');decoder.style.objectFit=fitMode==='cover'?'cover':'contain';requestAnimationFrame(renderCursor);setTimeout(renderCursor,100);setTimeout(renderCursor,500);}else if(e.track.kind==='audio'){remoteAudio.srcObject=new MediaStream([e.track]);remoteAudio.muted=!audioEnabled;remoteAudio.play().catch(()=>{hint.textContent='Click Audio once to enable sound';hint.classList.remove('hide');});}};
 dc=pc.createDataChannel('control',{ordered:true});pointerDc=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});
 dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Ctrl+V/C copy & paste · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),4500);};
 dc.onmessage=e=>{
