@@ -9,9 +9,9 @@
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text)}
 #root{position:fixed;inset:0;background:#000;display:grid;place-items:center}
 #surface{width:100%;height:100%;display:block;outline:0;touch-action:none;cursor:none;background:#000}
-#remote-cursor{position:fixed;left:0;top:0;width:18px;height:24px;z-index:25;pointer-events:none;transform:translate(-1px,-1px);filter:drop-shadow(0 1px 2px #000);display:none}
-#remote-cursor::before{content:"";position:absolute;left:0;top:0;width:0;height:0;border-top:22px solid #fff;border-right:10px solid transparent;transform:rotate(-8deg);filter:drop-shadow(0 0 0 #000);}
-#remote-cursor::after{content:"";position:absolute;left:1px;top:1px;width:0;height:0;border-top:18px solid #111;border-right:8px solid transparent;transform:rotate(-8deg);}
+#remote-cursor{position:fixed;left:0;top:0;width:28px;height:32px;z-index:25;pointer-events:none;transform:translate(0,0);filter:drop-shadow(0 2px 3px #000b);display:none;will-change:left,top}
+#remote-cursor svg{width:28px;height:32px;display:block}
+#remote-cursor.clicking{transform:scale(.9);transform-origin:1px 1px}
 #decoder{position:fixed;left:-10000px;top:-10000px;width:2px;height:2px;opacity:.001;pointer-events:none}
 #hud{position:fixed;left:14px;right:14px;top:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;pointer-events:none;z-index:10;transition:opacity .25s}
 .panel{background:var(--panel);border:1px solid var(--line);box-shadow:0 12px 40px #0008;backdrop-filter:blur(16px);border-radius:12px;padding:8px 11px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -23,7 +23,7 @@ body:hover #toolbar,body:focus-within #toolbar{opacity:1}button{border:1px solid
 </style>
 </head>
 <body>
-<div id="root"><canvas id="surface" tabindex="0"></canvas><div id="remote-cursor" aria-hidden="true"></div></div>
+<div id="root"><canvas id="surface" tabindex="0"></canvas><div id="remote-cursor" aria-hidden="true"><svg viewBox="0 0 28 32" xmlns="http://www.w3.org/2000/svg"><path d="M2 1 L2 27 L9 20 L14 30 L18 28 L13 18 L24 18 Z" fill="#fff" stroke="#000" stroke-width="2" stroke-linejoin="round"/></svg></div></div>
 <video id="decoder" autoplay playsinline muted></video>
 <div id="hud"><div class="panel" id="state"><span class="dot"></span><span>Connecting…</span></div><div class="panel" id="stats">—</div></div>
 <div id="hint">Click the desktop to control it · Esc releases pointer lock</div>
@@ -34,11 +34,11 @@ const qs=new URLSearchParams(location.search),endpoint=qs.get('endpoint');
 const canvas=document.getElementById('surface'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
 const decoder=document.getElementById('decoder'),state=document.getElementById('state'),stats=document.getElementById('stats'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 const pointerBtn=document.getElementById('pointer'),fullscreenBtn=document.getElementById('fullscreen'),muteBtn=document.getElementById('mute'),fitBtn=document.getElementById('fit'),reloadBtn=document.getElementById('reload'),remoteCursor=document.getElementById('remote-cursor');
-let pc=null,dc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),frames=0,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true,lastPointer={x:.5,y:.5},pendingMove=null,moveQueued=false,pressedButtons=new Set();
+let pc=null,dc=null,pointerDc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),frames=0,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true,lastPointer={x:.5,y:.5},pendingMove=null,moveQueued=false,pressedButtons=new Set();
 if(!endpoint){state.querySelector('span:last-child').textContent='Missing endpoint';throw new Error('Missing endpoint');}
 const setState=(text,kind='')=>{state.innerHTML=`<span class="dot ${kind}"></span><span>${text}</span>`};
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e);setState('Error','bad')};
-const send=o=>{if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));};
+const send=o=>{const ch=(o.type==='mouse'||o.type==='mouse_rel')?pointerDc:dc;if(ch&&ch.readyState==='open')ch.send(JSON.stringify(o));};
 function resize(){canvas.width=Math.max(1,remoteW||decoder.videoWidth||1920);canvas.height=Math.max(1,remoteH||decoder.videoHeight||1080);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';draw();}
 function contentRect(){const r=canvas.getBoundingClientRect(),vw=remoteW||decoder.videoWidth||1920,vh=remoteH||decoder.videoHeight||1080;const scale=fitMode==='cover'?Math.max(r.width/vw,r.height/vh):Math.min(r.width/vw,r.height/vh);return{left:r.left+(r.width-vw*scale)/2,top:r.top+(r.height-vh*scale)/2,width:vw*scale,height:vh*scale,scale};}
 function draw(){if(!decoder.videoWidth||!decoder.videoHeight)return;const cw=canvas.width,ch=canvas.height;ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);ctx.imageSmoothingEnabled=false;let scale=fitMode==='cover'?Math.max(cw/decoder.videoWidth,ch/decoder.videoHeight):Math.min(cw/decoder.videoWidth,ch/decoder.videoHeight);const w=decoder.videoWidth*scale,h=decoder.videoHeight*scale;ctx.drawImage(decoder,(cw-w)/2,(ch-h)/2,w,h);}
@@ -51,9 +51,14 @@ function flushMove(){moveQueued=false;if(!pendingMove)return;const m=pendingMove
 function queueMove(dx,dy){if(!pendingMove)pendingMove={dx:0,dy:0};pendingMove.dx+=dx;pendingMove.dy+=dy;if(!moveQueued){moveQueued=true;requestAnimationFrame(flushMove);}}
 canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
 canvas.addEventListener('mousemove',e=>{if(document.pointerLockElement===canvas)queueMove(e.movementX,e.movementY);else{const p=coords(e);sendAbsolute(p);}});
-canvas.addEventListener('mousedown',e=>{e.preventDefault();canvas.focus();const p=coords(e);sendAbsolute(p);sendButton(e.button+1,true);});
-canvas.addEventListener('mouseup',e=>{e.preventDefault();sendButton(e.button+1,false);});
-canvas.addEventListener('contextmenu',e=>e.preventDefault());
+canvas.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();canvas.focus();remoteCursor.classList.add('clicking');sendButton(e.button+1,true);});
+canvas.addEventListener('auxclick',e=>{e.preventDefault();e.stopPropagation();});
+canvas.addEventListener('mouseup',e=>{e.preventDefault();e.stopPropagation();remoteCursor.classList.remove('clicking');sendButton(e.button+1,false);});
+canvas.addEventListener('contextmenu',e=>{e.preventDefault();e.stopPropagation();});
+canvas.addEventListener('dragstart',e=>{e.preventDefault();e.stopPropagation();});
+canvas.addEventListener('selectstart',e=>{e.preventDefault();e.stopPropagation();});
+canvas.addEventListener('dblclick',e=>{e.preventDefault();e.stopPropagation();});
+document.addEventListener('click',e=>{if(e.target===canvas){e.preventDefault();e.stopPropagation();}},true);
 canvas.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
 window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();send({type:'key',code:e.code,key:e.key,down:true});});
 window.addEventListener('keyup',e=>send({type:'key',code:e.code,key:e.key,down:false}));
@@ -71,7 +76,8 @@ pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
 pc.onconnectionstatechange=()=>{const s=pc.connectionState;setState('WebRTC '+s,s==='connected'?'ok':(s==='failed'?'bad':''));};
 pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Direct P2P could not connect. Configure TURN.');};
 pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;loop();setState('Video connected','ok');}else if(e.track.kind==='audio'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.muted=!audioEnabled;decoder.play().catch(()=>{hint.textContent='Click Audio once to enable sound'});}};
-dc=pc.createDataChannel('input',{ordered:true});dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),3500);};
+dc=pc.createDataChannel('control',{ordered:true});pointerDc=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});
+dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),3500);};
 pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});await pc.setLocalDescription(await pc.createOffer());for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
 const base=endpoint.replace(/^wss:\/\//,'https://').replace(/^ws:\/\//,'http://');const signalUrl=base.replace(/\/webrtc$/,'/webrtc');let response;try{response=await fetch(signalUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({password,sdp:pc.localDescription.sdp}),cache:'no-store',mode:'cors'});}catch(e){throw new Error('Signaling request failed: '+(e?.message||e)+'\nURL: '+signalUrl)}if(!response.ok)throw new Error(`Signaling HTTP ${response.status}: ${await response.text()}`);const answer=await response.json();if(!answer.sdp)throw new Error(answer.error||'Signaling returned no SDP answer');await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});const r=answer.ready||{};remoteW=r.width||1920;remoteH=r.height||1080;stats.textContent=`${remoteW}×${remoteH} · ${r.videoCodecs?.join('/')||'auto'}`;resize();renderCursor();}
 start().catch(showError);
