@@ -32,6 +32,7 @@ if not PASSWORD:
 
 # Lock the stream to 30 FPS and a predictable 6 Mbps budget for desktop content.
 VIDEO_BITRATE = 6_000_000
+VIDEO_THREADS = max(2, min(3, os.cpu_count() or 2))
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
@@ -70,7 +71,7 @@ def make_video_player():
         "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "4.0",
         "-pix_fmt", "yuv420p", "-r", str(FPS), "-fps_mode", "cfr",
         "-g", str(FPS), "-keyint_min", str(FPS), "-sc_threshold", "0",
-        "-bf", "0", "-refs", "1", "-threads", "4",
+        "-bf", "0", "-refs", "1", "-threads", str(VIDEO_THREADS),
         "-b:v", str(VIDEO_BITRATE), "-minrate", str(VIDEO_BITRATE),
         "-maxrate", str(VIDEO_BITRATE), "-bufsize", str(VIDEO_BITRATE),
         "-x264-params", "repeat-headers=1:scenecut=0:force-cfr=1:rc-lookahead=0:sync-lookahead=0",
@@ -260,14 +261,18 @@ def cors_headers():
 
 def preferred_video_codecs():
     codecs = RTCRtpSender.getCapabilities("video").codecs
-    # The runner is CPU-only. At 1920x1080, software VP8/libvpx is a poor fit for
-    # a real-time desktop stream and can starve the capture/encoder pipeline.
-    # aiortc's H264Encoder uses libx264 with tune=zerolatency, so prefer H264 while
-    # retaining VP8 as a browser fallback.
-    h264_codecs = [c for c in codecs if c.mimeType.lower() == "video/h264"]
+    # FFmpeg emits constrained-baseline H.264. Put the matching 42e01f
+    # packetization profile first so aiortc does not negotiate a profile which
+    # the pre-encoded stream cannot satisfy.
+    h264 = [
+        c for c in codecs
+        if c.mimeType.lower() == "video/h264"
+        and c.parameters.get("packetization-mode") == "1"
+    ]
+    h264.sort(key=lambda c: 0 if c.parameters.get("profile-level-id", "").lower() == "42e01f" else 1)
     vp8 = [c for c in codecs if c.mimeType.lower() == "video/vp8"]
     rtx = [c for c in codecs if c.mimeType.lower() == "video/rtx"]
-    return h264_codecs + vp8 + rtx
+    return h264 + vp8 + rtx
 
 
 async def handle_offer_post(request):
@@ -291,7 +296,7 @@ async def handle_offer_post(request):
             transceiver = pc.addTransceiver(video.video, direction="sendonly")
             if selected_codecs:
                 transceiver.setCodecPreferences(selected_codecs)
-            log.info("video capture started: %sx%s @ %s fps; codec preference=%s", WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs])
+            log.info("video capture started: %sx%s @ %s fps; bitrate=%s; x264 threads=%s; codec preference=%s", WIDTH, HEIGHT, FPS, VIDEO_BITRATE, VIDEO_THREADS, [(c.mimeType, c.parameters) for c in selected_codecs])
         else:
             log.error("x11grab opened but did not expose a video track")
             return web.json_response({"error": "X11 video capture produced no video track"}, status=500, headers=cors_headers())
