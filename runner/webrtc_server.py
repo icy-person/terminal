@@ -74,7 +74,8 @@ def make_video_player():
 
 def make_audio_player():
     pulse = os.getenv("PULSE_SERVER", "")
-    return MediaPlayer(pulse or "default", format="pulse", options={
+    source = os.getenv("PULSE_SOURCE", "@DEFAULT_MONITOR@")
+    return MediaPlayer(source, format="pulse", options={
         "sample_rate": "48000",
         "channels": "2",
         "fflags": "nobuffer",
