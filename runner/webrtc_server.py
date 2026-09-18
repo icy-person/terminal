@@ -109,9 +109,10 @@ class PulseAudioTrack(MediaStreamTrack):
     SAMPLES = 960
     BYTES_PER_FRAME = SAMPLES * CHANNELS * 2
 
-    def __init__(self, source):
+    def __init__(self, source, loop):
         super().__init__()
         self.source = source
+        self._loop = loop
         self.queue = DropOldestQueue(maxsize=4)
         self.proc = subprocess.Popen([
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
@@ -156,7 +157,7 @@ class PulseAudioTrack(MediaStreamTrack):
 
 def make_audio_player():
     source = os.getenv("PULSE_SOURCE", "webrtc_sink.monitor")
-    return PulseAudioTrack(source)
+    return PulseAudioTrack(source, asyncio.get_running_loop())
 
 
 class InputBridge:
