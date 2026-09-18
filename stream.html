@@ -61,7 +61,35 @@ decoder.addEventListener('selectstart',e=>{e.preventDefault();e.stopPropagation(
 decoder.addEventListener('dblclick',e=>{e.preventDefault();e.stopPropagation();});
 document.addEventListener('click',e=>{if(e.target===decoder){e.preventDefault();e.stopPropagation();}},true);
 decoder.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
-window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();send({type:'key',code:e.code,key:e.key,down:true});});
+async function handleClipboardPaste(e){
+  e.preventDefault();
+  e.stopPropagation();
+  try{
+    const text=await navigator.clipboard.readText();
+    if(dc?.readyState==='open')dc.send(JSON.stringify({type:'paste',text}));
+  }catch(err){
+    hint.textContent='Clipboard permission denied — allow clipboard access for this site';
+    hint.classList.remove('hide');
+    setTimeout(()=>hint.classList.add('hide'),3500);
+  }
+}
+window.addEventListener('keydown',e=>{
+  const ctrl=e.ctrlKey||e.metaKey;
+  if(ctrl && e.code==='KeyV'){
+    handleClipboardPaste(e);
+    return;
+  }
+  if(ctrl && e.code==='KeyC'){
+    e.preventDefault();
+    e.stopPropagation();
+    send({type:'key',code:e.code,key:e.key,down:true});
+    setTimeout(()=>send({type:'key',code:e.code,key:e.key,down:false}),0);
+    setTimeout(()=>send({type:'clipboard-copy'}),120);
+    return;
+  }
+  if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();
+  send({type:'key',code:e.code,key:e.key,down:true});
+});
 window.addEventListener('keyup',e=>send({type:'key',code:e.code,key:e.key,down:false}));
 window.addEventListener('resize',()=>{resize();renderCursor();});
 fullscreenBtn.onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();
@@ -78,7 +106,23 @@ pc.onconnectionstatechange=()=>{const s=pc.connectionState;setState('WebRTC '+s,
 pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Direct P2P could not connect. Configure TURN.');};
 pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;setState('Video connected','ok');decoder.style.objectFit=fitMode==='cover'?'cover':'contain';requestAnimationFrame(renderCursor);setTimeout(renderCursor,100);setTimeout(renderCursor,500);}else if(e.track.kind==='audio'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.muted=!audioEnabled;decoder.play().catch(()=>{hint.textContent='Click Audio once to enable sound'});}};
 dc=pc.createDataChannel('control',{ordered:true});pointerDc=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});
-dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),3500);};
+dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Ctrl+V/C copy & paste · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),4500);};
+dc.onmessage=e=>{
+  try{
+    const msg=JSON.parse(e.data);
+    if(msg.type==='clipboard' && typeof msg.text==='string'){
+      navigator.clipboard?.writeText(msg.text).then(()=>{
+        hint.textContent='Copied from remote desktop';
+        hint.classList.remove('hide');
+        setTimeout(()=>hint.classList.add('hide'),1800);
+      }).catch(()=>{
+        hint.textContent='Remote text copied — browser blocked automatic clipboard write';
+        hint.classList.remove('hide');
+        setTimeout(()=>hint.classList.add('hide'),3500);
+      });
+    }
+  }catch{}
+};
 pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});await pc.setLocalDescription(await pc.createOffer());for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
 const base=endpoint.replace(/^wss:\/\//,'https://').replace(/^ws:\/\//,'http://');const signalUrl=base.replace(/\/webrtc$/,'/webrtc');let response;try{response=await fetch(signalUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({password,sdp:pc.localDescription.sdp}),cache:'no-store',mode:'cors'});}catch(e){throw new Error('Signaling request failed: '+(e?.message||e)+'\nURL: '+signalUrl)}if(!response.ok)throw new Error(`Signaling HTTP ${response.status}: ${await response.text()}`);const answer=await response.json();if(!answer.sdp)throw new Error(answer.error||'Signaling returned no SDP answer');await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});const r=answer.ready||{};remoteW=r.width||1920;remoteH=r.height||1080;stats.textContent=`${remoteW}×${remoteH} · ${r.videoCodecs?.join('/')||'auto'}`;resize();renderCursor();}
 start().catch(showError);
