@@ -310,6 +310,7 @@ jobs:
             ps -o pid,pcpu,pmem,rss,etime,cmd -p "$PID" || true
             pgrep -af 'ffmpeg.*x11grab' >/tmp/webrtc-ffmpeg-ps.txt 2>/dev/null || true
             cat /tmp/webrtc-ffmpeg-ps.txt 2>/dev/null || true
+            for F in $(pgrep -f 'ffmpeg.*x11grab' 2>/dev/null || true); do ps -o pid,pcpu,pmem,rss,etime,stat,cmd -p "$F" || true; done
             if [ -f "$RUNNER_TEMP/webrtc-video-progress.log" ]; then
               tail -n 12 "$RUNNER_TEMP/webrtc-video-progress.log" || true
             fi
