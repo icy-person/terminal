@@ -410,13 +410,16 @@ async def handle_offer_post(request):
             log.error("x11grab opened but did not expose a video track")
             return web.json_response({"error": "X11 video capture produced no video track"}, status=500, headers=cors_headers())
 
-        latest_video = LatestVideoTrack(video.video)
         selected_codecs = preferred_video_codecs()
-        transceiver = pc.addTransceiver(latest_video, direction="sendonly")
+        # The FFmpeg/MPEG-TS source is already H.264 packetized input. Do NOT
+        # drop individual packets/units: H.264 NAL fragments must stay ordered.
+        # A latest-frame adapter is correct for decoded VideoFrame capture but
+        # corrupts a pre-encoded stream and causes visible freezes.
+        transceiver = pc.addTransceiver(video.video, direction="sendonly")
         if selected_codecs:
             transceiver.setCodecPreferences(selected_codecs)
         log.info(
-            "video pipeline ready: FFmpeg H264 packets -> latest-packet mode -> aiortc RTP; "
+            "video pipeline ready: FFmpeg H264 packets -> aiortc RTP (no packet dropping); "
             "%sx%s @ %s fps; codec preference=%s",
             WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs],
         )
@@ -436,8 +439,6 @@ async def handle_offer_post(request):
             log.info("peer connection state=%s", pc.connectionState)
             if pc.connectionState in {"failed", "closed"}:
                 pcs.discard(pc)
-                if latest_video:
-                    latest_video.stop()
                 if video:
                     stop_video_player(video)
                 if audio:
@@ -510,8 +511,6 @@ async def handle_offer_post(request):
         log.exception("WebRTC HTTP signaling failed: %s", exc)
         if pc is not None:
             pcs.discard(pc)
-            if latest_video:
-                latest_video.stop()
             if video:
                 stop_video_player(video)
             if audio:
