@@ -57,15 +57,13 @@ async def wait_ice_complete(pc):
 
 
 def make_video_player():
+    # Keep x11grab conservative: the previous low-latency FFmpeg flags could
+    # make the live X11 demuxer stop advancing after its first frame.
     return MediaPlayer(DISPLAY, format="x11grab", options={
         "video_size": f"{WIDTH}x{HEIGHT}",
         "framerate": "30",
         "draw_mouse": "0",
-        "thread_queue_size": "2",
-        "fflags": "nobuffer",
-        "flags": "low_delay",
-        "probesize": "32",
-        "analyzeduration": "0",
+        "thread_queue_size": "8",
     }, decode=True)
 
 
