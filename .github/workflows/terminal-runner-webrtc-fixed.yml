@@ -114,7 +114,7 @@ jobs:
           xwininfo -display "$DISPLAY" -root -tree >> "$DIAG/x11.txt" 2>&1 || fail 'X11 root window inspection failed.'
 
           echo '=== XFCE processes ===' | tee -a "$DIAG/x11.txt"
-          pgrep -a -u streamuser -f 'xfce4-session|xfwm4|xfdesktop|xfsettingsd' >> "$DIAG/x11.txt" 2>&1 || true
+          pgrep -a -f 'xfce4-session|xfwm4|xfdesktop|xfsettingsd' >> "$DIAG/x11.txt" 2>&1 || true
           pgrep -x xfce4-session >/dev/null || fail 'xfce4-session is not running.'
           pgrep -x xfwm4 >/dev/null || fail 'xfwm4 is not running.'
 
