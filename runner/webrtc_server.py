@@ -94,7 +94,7 @@ def make_video_player():
         "-sc_threshold", "0",
         "-bf", "0",
         "-refs", "1",
-        "-threads", "4",
+        "-threads", os.getenv("WEBRTC_X264_THREADS", "4"),
         "-b:v", str(VIDEO_BITRATE),
         "-minrate", str(VIDEO_BITRATE),
         "-maxrate", str(VIDEO_BITRATE),
@@ -443,6 +443,11 @@ async def handle_offer_post(request):
         video = make_video_player()
         if not video.video:
             log.error("x11grab opened but did not expose a video track")
+            stop_video_player(video)
+            if input_worker:
+                input_worker.stop()
+            pcs.discard(pc)
+            await pc.close()
             return web.json_response({"error": "X11 video capture produced no video track"}, status=500, headers=cors_headers())
 
         selected_codecs = preferred_video_codecs()
