@@ -53,11 +53,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          useradd -m -s /bin/bash streamuser
-          usermod -aG audio streamuser || true
-          STREAM_UID="$(id -u streamuser)"
-          XDG_RUNTIME_DIR="/run/user/$STREAM_UID"
-          echo "STREAM_UID=$STREAM_UID" >> "$GITHUB_ENV"
+          # Run the desktop session as root. This is intentional for this
+          # disposable GitHub-hosted runner and makes the remote X11 session
+          # match the requested root user.
+          STREAM_UID="0"
+          XDG_RUNTIME_DIR="/run/user/0"
+          echo "STREAM_UID=0" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           export DISPLAY=:99 XAUTHORITY=/tmp/webrtc.Xauthority
           touch "$XAUTHORITY"
@@ -69,14 +70,20 @@ jobs:
           done
           xdpyinfo -display "$DISPLAY" >/dev/null
           xhost +local: >/dev/null
-          install -d -m 700 -o streamuser -g streamuser "$XDG_RUNTIME_DIR"
-          runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" bash -lc 'pipewire >/tmp/pipewire.log 2>&1 & pipewire-pulse >/tmp/pipewire-pulse.log 2>&1 & wireplumber >/tmp/wireplumber.log 2>&1 & sleep 2; dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 &'
+          install -d -m 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+          export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+          pipewire >/tmp/pipewire.log 2>&1 &
+          pipewire-pulse >/tmp/pipewire-pulse.log 2>&1 &
+          wireplumber >/tmp/wireplumber.log 2>&1 &
+          sleep 2
+          dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 &
           for _ in $(seq 1 60); do
-            if pgrep -u streamuser -x xfce4-session >/dev/null 2>&1 && pgrep -u streamuser -x xfwm4 >/dev/null 2>&1; then break; fi
+            if pgrep -x xfce4-session >/dev/null 2>&1 && pgrep -x xfwm4 >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          pgrep -u streamuser -x xfce4-session >/dev/null
-          pgrep -u streamuser -x xfwm4 >/dev/null
+          pgrep -x xfce4-session >/dev/null
+          pgrep -x xfwm4 >/dev/null
 
       - name: Preflight X11 capture and desktop rendering
         shell: bash
@@ -108,11 +115,11 @@ jobs:
 
           echo '=== XFCE processes ===' | tee -a "$DIAG/x11.txt"
           pgrep -a -u streamuser -f 'xfce4-session|xfwm4|xfdesktop|xfsettingsd' >> "$DIAG/x11.txt" 2>&1 || true
-          pgrep -u streamuser -x xfce4-session >/dev/null || fail 'xfce4-session is not running.'
-          pgrep -u streamuser -x xfwm4 >/dev/null || fail 'xfwm4 is not running.'
+          pgrep -x xfce4-session >/dev/null || fail 'xfce4-session is not running.'
+          pgrep -x xfwm4 >/dev/null || fail 'xfwm4 is not running.'
 
-          runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-            xfce4-terminal --title='WEBRTC PREFLIGHT - X11 CAPTURE OK' --geometry=90x20+120+100 \
+          env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            xfce4-terminal --title='WEBRTC PREFLIGHT - ROOT X11 CAPTURE OK' --geometry=90x20+120+100 \
             --command="bash -lc 'printf \"WEBRTC PREFLIGHT\\n\\nX11 capture test: OK\\n1920x1080\\nDISPLAY=$DISPLAY\\n\"; sleep 15'" \
             > "$DIAG/preflight-terminal.log" 2>&1 &
           sleep 3
