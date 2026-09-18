@@ -18,7 +18,7 @@ PASSWORD = os.environ.get("WEBRTC_PASSWORD", "")
 DISPLAY = os.getenv("DISPLAY", ":99")
 WIDTH = int(os.getenv("WEBRTC_WIDTH", "1920"))
 HEIGHT = int(os.getenv("WEBRTC_HEIGHT", "1080"))
-FPS = max(30, min(45, int(os.getenv("WEBRTC_FPS", "45"))))
+FPS = 30
 VIDEO_BITRATE = max(1_000_000, min(12_000_000, int(os.getenv("WEBRTC_VIDEO_BITRATE", "10000000"))))
 STUN_URL = os.getenv("WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
 TURN_URL = os.getenv("WEBRTC_TURN_URL", "")
@@ -28,10 +28,19 @@ TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 if not PASSWORD:
     raise SystemExit("WEBRTC_PASSWORD is required")
 
-# aiortc ships conservative VP8 limits which are too low for a 1920x1080 desktop.
+# Lock the stream to 30 FPS and a predictable 6 Mbps budget for desktop content.
+VIDEO_BITRATE = 6_000_000
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
-vpx.MIN_BITRATE = min(1_000_000, VIDEO_BITRATE)
+vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
+
+# libvpx has a dedicated screen-content mode. aiortc does not expose it,
+# so enable it on the encoder without changing the WebRTC signaling API.
+_original_vp8_init = vpx.Vp8Encoder.__init__
+def _screen_vp8_init(self, *args, **kwargs):
+    _original_vp8_init(self, *args, **kwargs)
+    self.codec.options["screen-content-mode"] = "2"
+vpx.Vp8Encoder.__init__ = _screen_vp8_init
 
 pcs = set()
 
@@ -57,8 +66,9 @@ async def wait_ice_complete(pc):
 def make_video_player():
     return MediaPlayer(DISPLAY, format="x11grab", options={
         "video_size": f"{WIDTH}x{HEIGHT}",
-        "framerate": str(FPS),
+        "framerate": "30",
         "draw_mouse": "0",
+        "thread_queue_size": "2",
         "fflags": "nobuffer",
         "flags": "low_delay",
         "probesize": "32",
