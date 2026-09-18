@@ -33,7 +33,7 @@ if not PASSWORD:
 
 # Lock the stream to 30 FPS and a predictable 6 Mbps budget for desktop content.
 VIDEO_BITRATE = 6_000_000
-VIDEO_THREADS = max(2, min(4, os.cpu_count() or 2))
+VIDEO_THREADS = max(2, min(4, int(os.getenv("WEBRTC_X264_THREADS", str(os.cpu_count() or 2)))))
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
