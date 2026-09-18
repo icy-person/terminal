@@ -7,6 +7,7 @@ import os
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
 from aiortc.contrib.media import MediaPlayer
+import aiortc.codecs.vpx as vpx
 
 logging.basicConfig(level=os.getenv("WEBRTC_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("terminal-webrtc")
@@ -26,6 +27,11 @@ TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 
 if not PASSWORD:
     raise SystemExit("WEBRTC_PASSWORD is required")
+
+# aiortc ships conservative VP8 limits which are too low for a 1920x1080 desktop.
+vpx.DEFAULT_BITRATE = VIDEO_BITRATE
+vpx.MIN_BITRATE = min(1_000_000, VIDEO_BITRATE)
+vpx.MAX_BITRATE = VIDEO_BITRATE
 
 pcs = set()
 
