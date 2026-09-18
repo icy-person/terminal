@@ -52,7 +52,7 @@ def make_video_player():
     return MediaPlayer(DISPLAY, format="x11grab", options={
         "video_size": f"{WIDTH}x{HEIGHT}",
         "framerate": str(FPS),
-        "draw_mouse": "1",
+        "draw_mouse": "0",
         "fflags": "nobuffer",
         "flags": "low_delay",
         "probesize": "32",
