@@ -142,6 +142,22 @@ class InputBridge:
             self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
             self.display.sync()
 
+    def text(self, text):
+        if not self.display or not text:
+            return
+        try:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard", "-in"],
+                input=str(text), text=True, check=True, timeout=3,
+                env={**os.environ, "DISPLAY": DISPLAY},
+            )
+            self.key("ControlLeft", "Control", True)
+            self.key("KeyV", "v", True)
+            self.key("KeyV", "v", False)
+            self.key("ControlLeft", "Control", False)
+        except Exception as exc:
+            log.warning("unicode text injection failed: %s", exc)
+
     def paste(self, text):
         if not self.display or text is None:
             return
@@ -277,8 +293,20 @@ async def handle_offer_post(request):
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
             log.info("peer connection state=%s", pc.connectionState)
-            if pc.connectionState in {"failed", "closed", "disconnected"}:
+            if pc.connectionState in {"failed", "closed"}:
                 pcs.discard(pc)
+                if video:
+                    video.stop()
+                if audio:
+                    audio.stop()
+                if pc.connectionState != "closed":
+                    await pc.close()
+            elif pc.connectionState == "disconnected":
+                log.warning("peer temporarily disconnected; waiting for ICE recovery")
+
+        @pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange():
+            log.info("ICE state=%s connection=%s", pc.iceConnectionState, pc.connectionState)
 
         @pc.on("datachannel")
         def on_datachannel(channel):
@@ -292,6 +320,8 @@ async def handle_offer_post(request):
                     kind = event.get("type")
                     if kind == "key":
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
+                    elif kind == "text":
+                        input_bridge.text(str(event.get("text", "")))
                     elif kind == "paste":
                         input_bridge.paste(str(event.get("text", "")))
                     elif kind == "clipboard-copy":
