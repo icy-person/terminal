@@ -31,18 +31,21 @@ const qs=new URLSearchParams(location.search),endpoint=qs.get('endpoint');
 const canvas=document.getElementById('surface'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
 const decoder=document.getElementById('decoder'),state=document.getElementById('state'),stats=document.getElementById('stats'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 const pointerBtn=document.getElementById('pointer'),fullscreenBtn=document.getElementById('fullscreen'),muteBtn=document.getElementById('mute'),fitBtn=document.getElementById('fit'),reloadBtn=document.getElementById('reload');
-let pc=null,dc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),frames=0,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true;
+let pc=null,dc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),frames=0,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true,lastPointer=null,pendingMove=null,moveQueued=false;
 if(!endpoint){state.querySelector('span:last-child').textContent='Missing endpoint';throw new Error('Missing endpoint');}
 const setState=(text,kind='')=>{state.innerHTML=`<span class="dot ${kind}"></span><span>${text}</span>`};
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e);setState('Error','bad')};
 const send=o=>{if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));};
 function resize(){const dpr=Math.min(2,devicePixelRatio||1);canvas.width=Math.max(1,innerWidth*dpr);canvas.height=Math.max(1,innerHeight*dpr);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';draw();}
-function draw(){if(!decoder.videoWidth||!decoder.videoHeight)return;const cw=canvas.width,ch=canvas.height;ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);let scale=fitMode==='cover'?Math.max(cw/decoder.videoWidth,ch/decoder.videoHeight):Math.min(cw/decoder.videoWidth,ch/decoder.videoHeight);const w=decoder.videoWidth*scale,h=decoder.videoHeight*scale;ctx.drawImage(decoder,(cw-w)/2,(ch-h)/2,w,h);}
+function draw(){if(!decoder.videoWidth||!decoder.videoHeight)return;const cw=canvas.width,ch=canvas.height;ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);let scale=fitMode==='cover'?Math.max(cw/decoder.videoWidth,ch/decoder.videoHeight):Math.min(cw/decoder.videoWidth,ch/decoder.videoHeight);const w=decoder.videoWidth*scale,h=decoder.videoHeight*scale;ctx.imageSmoothingEnabled=false;ctx.drawImage(decoder,(cw-w)/2,(ch-h)/2,w,h);}
 function loop(){if(!drawRunning)return;requestAnimationFrame(loop);if(decoder.readyState>=2&&decoder.currentTime!==lastFrame){lastFrame=decoder.currentTime;frames++;draw();}}
 function coords(e){const r=canvas.getBoundingClientRect();let x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;return{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))};}
-canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
-canvas.addEventListener('mousemove',e=>{if(document.pointerLockElement===canvas)send({type:'mouse_rel',dx:e.movementX,dy:e.movementY});else{const p=coords(e);send({type:'mouse',x:p.x,y:p.y,buttons:e.buttons});}});
-canvas.addEventListener('mousedown',e=>{canvas.focus();const p=coords(e);send({type:'button',x:p.x,y:p.y,button:e.button+1,down:true});});
+function sendAbsolute(p){lastPointer=p;send({type:'mouse',x:p.x,y:p.y});}
+function flushMove(){moveQueued=false;if(!pendingMove)return;const m=pendingMove;pendingMove=null;send({type:'mouse_rel',dx:m.dx,dy:m.dy});}
+function queueMove(dx,dy){if(!pendingMove)pendingMove={dx:0,dy:0};pendingMove.dx+=dx;pendingMove.dy+=dy;if(!moveQueued){moveQueued=true;requestAnimationFrame(flushMove);}}
+canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(lastPointer)sendAbsolute(lastPointer);if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
+canvas.addEventListener('mousemove',e=>{if(document.pointerLockElement===canvas)queueMove(e.movementX,e.movementY);else{const p=coords(e);sendAbsolute(p);}});
+canvas.addEventListener('mousedown',e=>{canvas.focus();const p=coords(e);sendAbsolute(p);send({type:'button',x:p.x,y:p.y,button:e.button+1,down:true});});
 canvas.addEventListener('mouseup',e=>send({type:'button',button:e.button+1,down:false}));
 canvas.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
 window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();send({type:'key',code:e.code,key:e.key,down:true});});
@@ -53,7 +56,7 @@ pointerBtn.onclick=()=>{canvas.focus();canvas.requestPointerLock?.();};
 fitBtn.onclick=()=>{fitMode=fitMode==='contain'?'cover':'contain';fitBtn.textContent=fitMode==='contain'?'Fit':'Fill';draw();};
 muteBtn.onclick=()=>{audioEnabled=!audioEnabled;decoder.muted=!audioEnabled;muteBtn.textContent=audioEnabled?'🔊 Audio':'🔇 Muted';if(audioEnabled)decoder.play().catch(()=>{});};
 reloadBtn.onclick=()=>location.reload();
-document.addEventListener('pointerlockchange',()=>pointerBtn.classList.toggle('active',document.pointerLockElement===canvas));
+document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===canvas;pointerBtn.classList.toggle('active',locked);if(locked&&lastPointer)sendAbsolute(lastPointer);});
 setInterval(async()=>{if(!pc)return;try{const rs=await pc.getStats();let inbound=null;rs.forEach(r=>{if(r.type==='inbound-rtp'&&r.kind==='video')inbound=r});if(inbound){const now=performance.now(),dt=(now-lastStats)/1000;const fps=dt>0?(frames/dt):0;stats.textContent=`${remoteW}×${remoteH} · ${fps.toFixed(0)} fps · ${Math.round((inbound.bytesReceived||0)/1024)} KB`;frames=0;lastStats=now;}}catch{}},1000);
 async function start(){errorBox.style.display='none';const password=window.prompt('WebRTC password:');if(password===null){setState('Password required','bad');return;}setState('Creating connection…');
 pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
