@@ -35,7 +35,7 @@ const qs=new URLSearchParams(location.search),endpoint=qs.get('endpoint');
 const canvas=document.getElementById('surface'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
 const decoder=document.getElementById('decoder'),state=document.getElementById('state'),stats=document.getElementById('stats'),errorBox=document.getElementById('error'),hint=document.getElementById('hint');
 const pointerBtn=document.getElementById('pointer'),fullscreenBtn=document.getElementById('fullscreen'),muteBtn=document.getElementById('mute'),fitBtn=document.getElementById('fit'),reloadBtn=document.getElementById('reload'),remoteCursor=document.getElementById('remote-cursor');
-let pc=null,dc=null,pointerDc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),lastDecoded=0,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true,lastPointer={x:.5,y:.5},pendingMove=null,moveQueued=false,pressedButtons=new Set();
+let pc=null,dc=null,pointerDc=null,drawRunning=false,lastFrame=0,lastStats=performance.now(),lastDecoded=null,remoteW=1920,remoteH=1080,fitMode='contain',audioEnabled=true,lastPointer={x:.5,y:.5},pendingMove=null,moveQueued=false,pressedButtons=new Set();
 if(!endpoint){state.querySelector('span:last-child').textContent='Missing endpoint';throw new Error('Missing endpoint');}
 const setState=(text,kind='')=>{state.innerHTML=`<span class="dot ${kind}"></span><span>${text}</span>`};
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e);setState('Error','bad')};
@@ -71,7 +71,7 @@ muteBtn.onclick=()=>{audioEnabled=!audioEnabled;decoder.muted=!audioEnabled;mute
 reloadBtn.onclick=()=>location.reload();
 document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===decoder;pointerBtn.classList.toggle('active',locked);remoteCursor.style.display='block';if(locked)renderCursor();});
 window.addEventListener('blur',()=>{for(const b of pressedButtons)sendButton(b,false);pressedButtons.clear();});
-setInterval(async()=>{if(!pc)return;try{const rs=await pc.getStats();let inbound=null;rs.forEach(r=>{if(r.type==='inbound-rtp'&&r.kind==='video')inbound=r});if(inbound){const now=performance.now(),dt=(now-lastStats)/1000;const fps=dt>0?(frames/dt):0;stats.textContent=`${remoteW}×${remoteH} · ${fps.toFixed(0)} fps · ${Math.round((inbound.bytesReceived||0)/1024)} KB`;frames=0;lastStats=now;}}catch{}},1000);
+setInterval(async()=>{if(!pc)return;try{const rs=await pc.getStats();let inbound=null;rs.forEach(r=>{if(r.type==='inbound-rtp'&&r.kind==='video')inbound=r});if(inbound){const now=performance.now(),dt=(now-lastStats)/1000;const q=decoder.getVideoPlaybackQuality?.();const decoded=q?.totalVideoFrames??inbound.framesDecoded??0;let fps=0;if(lastDecoded!==null&&dt>0)fps=Math.max(0,(decoded-lastDecoded)/dt);lastDecoded=decoded;lastStats=now;stats.textContent=`${remoteW}×${remoteH} · ${fps.toFixed(0)} fps · ${Math.round((inbound.bytesReceived||0)/1024)} KB`;}}catch(e){}} ,1000);
 async function start(){errorBox.style.display='none';const password=window.prompt('WebRTC password:');if(password===null){setState('Password required','bad');return;}setState('Creating connection…');
 pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
 pc.onconnectionstatechange=()=>{const s=pc.connectionState;setState('WebRTC '+s,s==='connected'?'ok':(s==='failed'?'bad':''));};
