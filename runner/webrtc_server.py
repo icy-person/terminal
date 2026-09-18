@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import subprocess
-import signal
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
@@ -83,7 +82,7 @@ def make_video_player():
         "-preset", "ultrafast",
         "-tune", "zerolatency",
         "-profile:v", "baseline",
-        "-level:v", "3.1",
+        "-level:v", "4.0",
         "-pix_fmt", "yuv420p",
         "-r", str(FPS),
         "-fps_mode", "cfr",
