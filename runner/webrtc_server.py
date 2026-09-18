@@ -338,6 +338,24 @@ class InputWorker:
         if changed:
             self.bridge.sync()
 
+    def _start_paste(self, text):
+        threading.Thread(target=self._paste_background, args=(text,), name="x11-paste", daemon=True).start()
+
+    def _paste_background(self, text):
+        try:
+            self.bridge.paste(text)
+            self.queue.put(("paste_ready",))
+        except Exception as exc:
+            log.debug("background paste failed: %s", exc)
+
+    def _clipboard_background(self, channel):
+        try:
+            text = self.bridge.clipboard()
+            if text:
+                self.loop.call_soon_threadsafe(self._send_clipboard, channel, text)
+        except Exception as exc:
+            log.debug("background clipboard read failed: %s", exc)
+
     def _run(self):
         while self.running:
             try:
@@ -363,11 +381,14 @@ class InputWorker:
                     elif kind == "wheel":
                         self.bridge.wheel(event[1])
                     elif kind == "paste":
-                        self.bridge.paste(event[1])
+                        self._start_paste(event[1])
                     elif kind == "clipboard":
-                        text = self.bridge.clipboard()
-                        if text and event[1].readyState == "open":
-                            self.loop.call_soon_threadsafe(self._send_clipboard, event[1], text)
+                        threading.Thread(target=self._clipboard_background, args=(event[1],), name="x11-clipboard", daemon=True).start()
+                    elif kind == "paste_ready":
+                        self.bridge.key("ControlLeft", "Control", True)
+                        self.bridge.key("KeyV", "v", True)
+                        self.bridge.key("KeyV", "v", False)
+                        self.bridge.key("ControlLeft", "Control", False)
                     self.bridge.sync()
             except Exception as exc:
                 log.debug("input worker event failed: %s", exc)
