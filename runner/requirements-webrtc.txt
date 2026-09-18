@@ -3,6 +3,6 @@ aiortc>=1.15,<2
 aiohttp>=3.12,<4
 # Do not pin PyAV to the old 14.x series: it can force a source build against
 # the runner's current FFmpeg. Current PyAV publishes binary wheels.
-av>=15,<17
+av>=17,<18
 Pillow>=11,<13
 python-xlib>=0.33,<1
