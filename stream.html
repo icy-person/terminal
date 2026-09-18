@@ -36,16 +36,17 @@ if(!endpoint){state.querySelector('span:last-child').textContent='Missing endpoi
 const setState=(text,kind='')=>{state.innerHTML=`<span class="dot ${kind}"></span><span>${text}</span>`};
 const showError=e=>{errorBox.style.display='block';errorBox.textContent=String(e?.message||e);setState('Error','bad')};
 const send=o=>{if(dc&&dc.readyState==='open')dc.send(JSON.stringify(o));};
-function resize(){const dpr=Math.min(2,devicePixelRatio||1);canvas.width=Math.max(1,innerWidth*dpr);canvas.height=Math.max(1,innerHeight*dpr);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';draw();}
-function draw(){if(!decoder.videoWidth||!decoder.videoHeight)return;const cw=canvas.width,ch=canvas.height;ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);let scale=fitMode==='cover'?Math.max(cw/decoder.videoWidth,ch/decoder.videoHeight):Math.min(cw/decoder.videoWidth,ch/decoder.videoHeight);const w=decoder.videoWidth*scale,h=decoder.videoHeight*scale;ctx.imageSmoothingEnabled=false;ctx.drawImage(decoder,(cw-w)/2,(ch-h)/2,w,h);}
+function resize(){canvas.width=Math.max(1,remoteW||decoder.videoWidth||1920);canvas.height=Math.max(1,remoteH||decoder.videoHeight||1080);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';draw();}
+function contentRect(){const r=canvas.getBoundingClientRect(),vw=remoteW||decoder.videoWidth||1920,vh=remoteH||decoder.videoHeight||1080;const scale=fitMode==='cover'?Math.max(r.width/vw,r.height/vh):Math.min(r.width/vw,r.height/vh);return{left:r.left+(r.width-vw*scale)/2,top:r.top+(r.height-vh*scale)/2,width:vw*scale,height:vh*scale,scale};}
+function draw(){if(!decoder.videoWidth||!decoder.videoHeight)return;const cw=canvas.width,ch=canvas.height;ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);ctx.imageSmoothingEnabled=false;let scale=fitMode==='cover'?Math.max(cw/decoder.videoWidth,ch/decoder.videoHeight):Math.min(cw/decoder.videoWidth,ch/decoder.videoHeight);const w=decoder.videoWidth*scale,h=decoder.videoHeight*scale;ctx.drawImage(decoder,(cw-w)/2,(ch-h)/2,w,h);}
 function loop(){if(!drawRunning)return;requestAnimationFrame(loop);if(decoder.readyState>=2&&decoder.currentTime!==lastFrame){lastFrame=decoder.currentTime;frames++;draw();}}
-function coords(e){const r=canvas.getBoundingClientRect();let x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;return{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))};}
+function coords(e){const q=contentRect();let x=(e.clientX-q.left)/q.width,y=(e.clientY-q.top)/q.height;return{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))};}
 function sendAbsolute(p){lastPointer=p;send({type:'mouse',x:p.x,y:p.y});}
 function flushMove(){moveQueued=false;if(!pendingMove)return;const m=pendingMove;pendingMove=null;send({type:'mouse_rel',dx:m.dx,dy:m.dy});}
 function queueMove(dx,dy){if(!pendingMove)pendingMove={dx:0,dy:0};pendingMove.dx+=dx;pendingMove.dy+=dy;if(!moveQueued){moveQueued=true;requestAnimationFrame(flushMove);}}
-canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(lastPointer)sendAbsolute(lastPointer);if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
+canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
 canvas.addEventListener('mousemove',e=>{if(document.pointerLockElement===canvas)queueMove(e.movementX,e.movementY);else{const p=coords(e);sendAbsolute(p);}});
-canvas.addEventListener('mousedown',e=>{canvas.focus();const p=coords(e);sendAbsolute(p);send({type:'button',x:p.x,y:p.y,button:e.button+1,down:true});});
+canvas.addEventListener('mousedown',e=>{canvas.focus();const p=coords(e);sendAbsolute(p);send({type:'button',button:e.button+1,down:true});});
 canvas.addEventListener('mouseup',e=>send({type:'button',button:e.button+1,down:false}));
 canvas.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
 window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();send({type:'key',code:e.code,key:e.key,down:true});});
