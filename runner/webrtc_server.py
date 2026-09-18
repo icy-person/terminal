@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 import asyncio
+import fractions
 import json
 import logging
 import os
 import subprocess
+import threading
 import time
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
+from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
+from av import AudioFrame
 from aiortc.contrib.media import MediaPlayer
 import aiortc.codecs.vpx as vpx
 import aiortc.codecs.h264 as h264
@@ -98,14 +102,61 @@ def make_video_player():
         player.video._queue = DropOldestQueue(maxsize=4)
     return player
 
+class PulseAudioTrack(MediaStreamTrack):
+    kind = "audio"
+    RATE = 48000
+    CHANNELS = 2
+    SAMPLES = 960
+    BYTES_PER_FRAME = SAMPLES * CHANNELS * 2
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+        self.queue = DropOldestQueue(maxsize=4)
+        self.proc = subprocess.Popen([
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-f", "pulse", "-i", source,
+            "-ac", "2", "-ar", "48000", "-f", "s16le", "pipe:1",
+        ], stdout=subprocess.PIPE, stderr=open(os.getenv("WEBRTC_AUDIO_LOG", "/tmp/webrtc-audio-ffmpeg.log"), "ab", buffering=0), bufsize=0,
+        env={**os.environ, "PULSE_SERVER": os.getenv("PULSE_SERVER", "")})
+        self.running = True
+        self.pts = 0
+        self.thread = threading.Thread(target=self._reader, name="pulse-audio", daemon=True)
+        self.thread.start()
+
+    def _reader(self):
+        while self.running and self.proc.stdout:
+            data = self.proc.stdout.read(self.BYTES_PER_FRAME)
+            if not data or len(data) < self.BYTES_PER_FRAME:
+                break
+            asyncio.run_coroutine_threadsafe(self.queue.put(data), self._loop)
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        if not hasattr(self, "_loop"):
+            self._loop = asyncio.get_running_loop()
+        data = await self.queue.get()
+        frame = AudioFrame(format="s16", layout="stereo", samples=self.SAMPLES)
+        frame.planes[0].update(data)
+        frame.sample_rate = self.RATE
+        frame.pts = self.pts
+        frame.time_base = fractions.Fraction(1, self.RATE)
+        self.pts += self.SAMPLES
+        return frame
+
+    def stop(self):
+        if self.running:
+            self.running = False
+            try: self.proc.terminate()
+            except Exception: pass
+            if self.thread.is_alive(): self.thread.join(timeout=1)
+        super().stop()
+
+
 def make_audio_player():
-    pulse = os.getenv("PULSE_SERVER", "")
-    source = os.getenv("PULSE_SOURCE", "@DEFAULT_MONITOR@")
-    return MediaPlayer(source, format="pulse", options={
-        "sample_rate": "48000",
-        "channels": "2",
-        "thread_queue_size": "64",
-    }, decode=True)
+    source = os.getenv("PULSE_SOURCE", "webrtc_sink.monitor")
+    return PulseAudioTrack(source)
 
 
 class InputBridge:
