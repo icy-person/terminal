@@ -91,6 +91,7 @@ def make_video_player():
         "-sc_threshold", "0",
         "-bf", "0",
         "-refs", "1",
+        "-threads", "4",
         "-b:v", str(VIDEO_BITRATE),
         "-minrate", str(VIDEO_BITRATE),
         "-maxrate", str(VIDEO_BITRATE),
