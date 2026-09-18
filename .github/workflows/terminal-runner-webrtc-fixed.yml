@@ -201,6 +201,9 @@ jobs:
           WEBRTC_PASSWORD: ${{ secrets.WEBRTC_PASSWORD }}
           WEBRTC_FPS: '30'
           WEBRTC_VIDEO_BITRATE: ${{ inputs.bitrate || '6000000' }}
+          WEBRTC_X264_THREADS: '4'
+          WEBRTC_VIDEO_PROGRESS: ${{ runner.temp }}/webrtc-video-progress.log
+          WEBRTC_VIDEO_LOG: ${{ runner.temp }}/webrtc-video-ffmpeg.log
           WEBRTC_TURN_URL: ${{ secrets.WEBRTC_TURN_URL }}
           WEBRTC_TURN_USERNAME: ${{ secrets.WEBRTC_TURN_USERNAME }}
           WEBRTC_TURN_PASSWORD: ${{ secrets.WEBRTC_TURN_PASSWORD }}
@@ -295,10 +298,25 @@ jobs:
         run: |
           set -euo pipefail
           while true; do
-            if ! kill -0 "$(pgrep -fo 'runner/webrtc_server.py' || true)" 2>/dev/null; then
+            PID="$(pgrep -fo 'runner/webrtc_server.py' || true)"
+            if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
               echo 'WebRTC server process is no longer running.'
               cat "$RUNNER_TEMP/webrtc.log" || true
               exit 1
             fi
+
+            echo '--- WebRTC live telemetry ---'
+            date -Is
+            ps -o pid,pcpu,pmem,rss,etime,cmd -p "$PID" || true
+            pgrep -af 'ffmpeg.*x11grab' >/tmp/webrtc-ffmpeg-ps.txt 2>/dev/null || true
+            cat /tmp/webrtc-ffmpeg-ps.txt 2>/dev/null || true
+            if [ -f "$RUNNER_TEMP/webrtc-video-progress.log" ]; then
+              tail -n 12 "$RUNNER_TEMP/webrtc-video-progress.log" || true
+            fi
+            echo '--- input/server tail ---'
+            tail -n 20 "$RUNNER_TEMP/webrtc.log" || true
+            echo '--- x264 ffmpeg tail ---'
+            tail -n 12 "$RUNNER_TEMP/webrtc-video-ffmpeg.log" || true
+
             sleep "$IDLE_SECONDS"
           done
