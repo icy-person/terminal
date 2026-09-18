@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
@@ -32,7 +33,7 @@ if not PASSWORD:
 
 # Lock the stream to 30 FPS and a predictable 6 Mbps budget for desktop content.
 VIDEO_BITRATE = 6_000_000
-VIDEO_THREADS = max(2, min(3, os.cpu_count() or 2))
+VIDEO_THREADS = max(2, min(4, os.cpu_count() or 2))
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
@@ -42,6 +43,13 @@ h264.MAX_BITRATE = VIDEO_BITRATE
 
 
 pcs = set()
+
+class DropOldestQueue(asyncio.Queue):
+    async def put(self, item):
+        if self.full():
+            try: self.get_nowait()
+            except asyncio.QueueEmpty: pass
+        self.put_nowait(item)
 
 
 def turn_configured():
@@ -74,9 +82,9 @@ def make_video_player():
         "-bf", "0", "-refs", "1", "-threads", str(VIDEO_THREADS),
         "-b:v", str(VIDEO_BITRATE), "-minrate", str(VIDEO_BITRATE),
         "-maxrate", str(VIDEO_BITRATE), "-bufsize", str(VIDEO_BITRATE),
-        "-x264-params", "repeat-headers=1:scenecut=0:force-cfr=1:rc-lookahead=0:sync-lookahead=0",
+        "-x264-params", "repeat-headers=1:scenecut=0:force-cfr=1:rc-lookahead=0:sync-lookahead=0:sliced-threads=1:slices=4",
         "-fflags", "+nobuffer", "-muxdelay", "0", "-muxpreload", "0",
-        "-flush_packets", "1", "-f", "mpegts", "pipe:1",
+        "-flush_packets", "1", "-stats_period", "2", "-progress", os.getenv("WEBRTC_VIDEO_PROGRESS", "/tmp/webrtc-video-progress.log"), "-f", "mpegts", "pipe:1",
     ]
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE,
@@ -86,6 +94,8 @@ def make_video_player():
     player = MediaPlayer(proc.stdout, format="mpegts", decode=False)
     player._throttle_playback = False
     player._webrtc_ffmpeg = proc
+    if getattr(player, 'video', None) is not None:
+        player.video._queue = DropOldestQueue(maxsize=4)
     return player
 
 def make_audio_player():
@@ -326,6 +336,20 @@ async def handle_offer_post(request):
         @pc.on("iceconnectionstatechange")
         async def on_iceconnectionstatechange():
             log.info("ICE state=%s connection=%s", pc.iceConnectionState, pc.connectionState)
+
+        async def telemetry():
+            while pc.connectionState not in {"closed", "failed"}:
+                await asyncio.sleep(5)
+                try:
+                    q = getattr(getattr(video, 'video', None), '_queue', None)
+                    if q is not None:
+                        log.info("video queue=%s/%s", q.qsize(), q.maxsize)
+                    proc = getattr(video, '_webrtc_ffmpeg', None)
+                    if proc is not None and proc.poll() is not None:
+                        log.error("FFmpeg exited rc=%s", proc.returncode)
+                except Exception:
+                    pass
+        asyncio.create_task(telemetry())
 
         @pc.on("datachannel")
         def on_datachannel(channel):
