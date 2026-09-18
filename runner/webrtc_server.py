@@ -108,6 +108,7 @@ class InputBridge:
             self.display, self.xtest = xdisplay.Display(DISPLAY), xtest
             screen = self.display.screen()
             self.width, self.height = screen.width_in_pixels, screen.height_in_pixels
+            self.mouse_x, self.mouse_y = self.width // 2, self.height // 2
             log.info("XTest input bridge ready: %s %sx%s", DISPLAY, self.width, self.height)
         except Exception as exc:
             log.warning("XTest input bridge unavailable: %s", exc)
@@ -206,25 +207,25 @@ class InputBridge:
     def mouse(self, x, y):
         if not self.display:
             return
-        px = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
-        py = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
+        self.mouse_x = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
+        self.mouse_y = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
         self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
-        self.display.sync()
+        self.display.flush()
 
     def button(self, button, down):
         if not self.display:
             return
         if button:
             self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
-            self.display.sync()
+            self.display.flush()
 
     def mouse_relative(self, dx, dy):
         if not self.display:
             return
-        self.mouse_x = max(0, min(self.width - 1, int(getattr(self, 'mouse_x', self.width // 2) + float(dx))))
-        self.mouse_y = max(0, min(self.height - 1, int(getattr(self, 'mouse_y', self.height // 2) + float(dy))))
-        self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
-        self.display.sync()
+        self.mouse_x = max(0, min(self.width - 1, int(self.mouse_x + float(dx))))
+        self.mouse_y = max(0, min(self.height - 1, int(self.mouse_y + float(dy))))
+        self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
+        self.display.flush()
 
     def wheel(self, delta):
         if not self.display:
@@ -234,7 +235,7 @@ class InputBridge:
         for _ in range(count):
             self.xtest.fake_input(self.display, self.X.ButtonPress, button)
             self.xtest.fake_input(self.display, self.X.ButtonRelease, button)
-        self.display.sync()
+        self.display.flush()
 
 
 async def health(_request):
