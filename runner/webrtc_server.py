@@ -8,6 +8,7 @@ from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
 from aiortc.contrib.media import MediaPlayer
 import aiortc.codecs.vpx as vpx
+import aiortc.codecs.h264 as h264
 
 logging.basicConfig(level=os.getenv("WEBRTC_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("terminal-webrtc")
@@ -33,6 +34,9 @@ VIDEO_BITRATE = 6_000_000
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
 vpx.MAX_BITRATE = VIDEO_BITRATE
+h264.DEFAULT_BITRATE = VIDEO_BITRATE
+h264.MIN_BITRATE = VIDEO_BITRATE
+h264.MAX_BITRATE = VIDEO_BITRATE
 
 
 pcs = set()
@@ -175,13 +179,14 @@ def cors_headers():
 
 def preferred_video_codecs():
     codecs = RTCRtpSender.getCapabilities("video").codecs
-    # Prefer VP8 for maximum browser/aiortc interoperability. H264 remains available
-    # as the second choice. Forcing H264 alone can produce a connected-but-black
-    # Chromium surface when the negotiated H264 profile/encoder path disagrees.
+    # The runner is CPU-only. At 1920x1080, software VP8/libvpx is a poor fit for
+    # a real-time desktop stream and can starve the capture/encoder pipeline.
+    # aiortc's H264Encoder uses libx264 with tune=zerolatency, so prefer H264 while
+    # retaining VP8 as a browser fallback.
+    h264_codecs = [c for c in codecs if c.mimeType.lower() == "video/h264"]
     vp8 = [c for c in codecs if c.mimeType.lower() == "video/vp8"]
-    h264 = [c for c in codecs if c.mimeType.lower() == "video/h264"]
     rtx = [c for c in codecs if c.mimeType.lower() == "video/rtx"]
-    return vp8 + h264 + rtx
+    return h264_codecs + vp8 + rtx
 
 
 async def handle_offer_post(request):
