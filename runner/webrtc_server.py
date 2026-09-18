@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
@@ -100,19 +101,38 @@ class InputBridge:
     def _keycode(self, code, key):
         if not self.display:
             return 0
-        names = {"Escape":"Escape", "Enter":"Return", "Tab":"Tab", "Backspace":"BackSpace", "Delete":"Delete", "Insert":"Insert", "Home":"Home", "End":"End", "PageUp":"Prior", "PageDown":"Next", "ArrowUp":"Up", "ArrowDown":"Down", "ArrowLeft":"Left", "ArrowRight":"Right", "Space":"space", "ShiftLeft":"Shift_L", "ShiftRight":"Shift_R", "ControlLeft":"Control_L", "ControlRight":"Control_R", "AltLeft":"Alt_L", "AltRight":"Alt_R", "MetaLeft":"Super_L", "MetaRight":"Super_R", "CapsLock":"Caps_Lock", "NumLock":"Num_Lock"}
+        names = {
+            "Escape":"Escape", "Enter":"Return", "Tab":"Tab", "Backspace":"BackSpace",
+            "Delete":"Delete", "Insert":"Insert", "Home":"Home", "End":"End",
+            "PageUp":"Prior", "PageDown":"Next", "ArrowUp":"Up", "ArrowDown":"Down",
+            "ArrowLeft":"Left", "ArrowRight":"Right", "Space":"space",
+            "ShiftLeft":"Shift_L", "ShiftRight":"Shift_R", "ControlLeft":"Control_L",
+            "ControlRight":"Control_R", "AltLeft":"Alt_L", "AltRight":"Alt_R",
+            "MetaLeft":"Super_L", "MetaRight":"Super_R", "CapsLock":"Caps_Lock",
+            "NumLock":"Num_Lock", "Minus":"minus", "Equal":"equal",
+            "BracketLeft":"bracketleft", "BracketRight":"bracketright",
+            "Backslash":"backslash", "Semicolon":"semicolon", "Quote":"apostrophe",
+            "Comma":"comma", "Period":"period", "Slash":"slash", "Backquote":"grave",
+        }
         name = names.get(code)
         if not name and code.startswith("Key") and len(code) == 4:
             name = code[-1].lower()
         if not name and code.startswith("Digit") and len(code) == 6:
             name = code[-1]
+        if not name and code.startswith("Numpad"):
+            name = {"NumpadAdd":"KP_Add", "NumpadSubtract":"KP_Subtract",
+                    "NumpadMultiply":"KP_Multiply", "NumpadDivide":"KP_Divide",
+                    "NumpadDecimal":"KP_Decimal", "NumpadEnter":"KP_Enter"}.get(code)
         if not name and code.startswith("F") and code[1:].isdigit():
             name = code
         if not name and len(key) == 1:
             name = key
         if not name:
             return 0
-        return self.display.keysym_to_keycode(self.XK.string_to_keysym(name))
+        keysym = self.XK.string_to_keysym(name)
+        if keysym == 0 and len(key) == 1:
+            keysym = self.XK.string_to_keysym(key)
+        return self.display.keysym_to_keycode(keysym) if keysym else 0
 
     def key(self, code, key, down):
         if not self.display:
@@ -121,6 +141,37 @@ class InputBridge:
         if kc:
             self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
             self.display.sync()
+
+    def paste(self, text):
+        if not self.display or text is None:
+            return
+        try:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard", "-in"],
+                input=str(text),
+                text=True,
+                check=True,
+                timeout=3,
+                env={**os.environ, "DISPLAY": DISPLAY},
+            )
+            self.key("ControlLeft", "Control", True)
+            self.key("KeyV", "v", True)
+            self.key("KeyV", "v", False)
+            self.key("ControlLeft", "Control", False)
+        except Exception as exc:
+            log.warning("clipboard paste failed: %s", exc)
+
+    def clipboard(self):
+        if not self.display:
+            return ""
+        try:
+            return subprocess.run(
+                ["xclip", "-selection", "clipboard", "-out"],
+                capture_output=True, text=True, check=True, timeout=2,
+                env={**os.environ, "DISPLAY": DISPLAY},
+            ).stdout
+        except Exception:
+            return ""
 
     def mouse(self, x, y):
         if not self.display:
@@ -241,6 +292,12 @@ async def handle_offer_post(request):
                     kind = event.get("type")
                     if kind == "key":
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
+                    elif kind == "paste":
+                        input_bridge.paste(str(event.get("text", "")))
+                    elif kind == "clipboard-copy":
+                        text = input_bridge.clipboard()
+                        if text and channel.readyState == "open":
+                            channel.send(json.dumps({"type": "clipboard", "text": text}))
                     elif kind == "mouse":
                         input_bridge.mouse(float(event.get("x", 0.5)), float(event.get("y", 0.5)))
                     elif kind == "button":
