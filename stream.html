@@ -51,8 +51,9 @@ function flushMove(){moveQueued=false;if(!pendingMove)return;const m=pendingMove
 function queueMove(dx,dy){if(!pendingMove)pendingMove={dx:0,dy:0};pendingMove.dx+=dx;pendingMove.dy+=dy;if(!moveQueued){moveQueued=true;requestAnimationFrame(flushMove);}}
 canvas.addEventListener('click',async()=>{canvas.focus();hint.classList.add('hide');if(document.pointerLockElement!==canvas){try{await canvas.requestPointerLock()}catch{}}});
 canvas.addEventListener('mousemove',e=>{if(document.pointerLockElement===canvas)queueMove(e.movementX,e.movementY);else{const p=coords(e);sendAbsolute(p);}});
-canvas.addEventListener('mousedown',e=>{canvas.focus();const p=coords(e);sendAbsolute(p);send({type:'button',button:e.button+1,down:true});});
-canvas.addEventListener('mouseup',e=>send({type:'button',button:e.button+1,down:false}));
+canvas.addEventListener('mousedown',e=>{e.preventDefault();canvas.focus();const p=coords(e);sendAbsolute(p);send({type:'button',button:e.button+1,down:true});});
+canvas.addEventListener('mouseup',e=>{e.preventDefault();send({type:'button',button:e.button+1,down:false});});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
 canvas.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY});},{passive:false});
 window.addEventListener('keydown',e=>{if(['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','Escape','Backspace','Delete'].includes(e.code))e.preventDefault();send({type:'key',code:e.code,key:e.key,down:true});});
 window.addEventListener('keyup',e=>send({type:'key',code:e.code,key:e.key,down:false}));
@@ -62,7 +63,7 @@ pointerBtn.onclick=()=>{canvas.focus();canvas.requestPointerLock?.();};
 fitBtn.onclick=()=>{fitMode=fitMode==='contain'?'cover':'contain';fitBtn.textContent=fitMode==='contain'?'Fit':'Fill';draw();};
 muteBtn.onclick=()=>{audioEnabled=!audioEnabled;decoder.muted=!audioEnabled;muteBtn.textContent=audioEnabled?'🔊 Audio':'🔇 Muted';if(audioEnabled)decoder.play().catch(()=>{});};
 reloadBtn.onclick=()=>location.reload();
-document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===canvas;pointerBtn.classList.toggle('active',locked);remoteCursor.style.display=locked?'block':'block';if(locked)sendAbsolute(lastPointer);});
+document.addEventListener('pointerlockchange',()=>{const locked=document.pointerLockElement===canvas;pointerBtn.classList.toggle('active',locked);remoteCursor.style.display='block';if(locked)sendAbsolute(lastPointer);});
 window.addEventListener('blur',()=>{for(const b of pressedButtons)sendButton(b,false);pressedButtons.clear();});
 setInterval(async()=>{if(!pc)return;try{const rs=await pc.getStats();let inbound=null;rs.forEach(r=>{if(r.type==='inbound-rtp'&&r.kind==='video')inbound=r});if(inbound){const now=performance.now(),dt=(now-lastStats)/1000;const fps=dt>0?(frames/dt):0;stats.textContent=`${remoteW}×${remoteH} · ${fps.toFixed(0)} fps · ${Math.round((inbound.bytesReceived||0)/1024)} KB`;frames=0;lastStats=now;}}catch{}},1000);
 async function start(){errorBox.style.display='none';const password=window.prompt('WebRTC password:');if(password===null){setState('Password required','bad');return;}setState('Creating connection…');
@@ -70,7 +71,7 @@ pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
 pc.onconnectionstatechange=()=>{const s=pc.connectionState;setState('WebRTC '+s,s==='connected'?'ok':(s==='failed'?'bad':''));};
 pc.oniceconnectionstatechange=()=>{if(pc.iceConnectionState==='failed')showError('ICE failed. Direct P2P could not connect. Configure TURN.');};
 pc.ontrack=e=>{if(e.track.kind==='video'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.play().catch(()=>{});drawRunning=true;loop();setState('Video connected','ok');}else if(e.track.kind==='audio'){decoder.srcObject=decoder.srcObject||new MediaStream();decoder.srcObject.addTrack(e.track);decoder.muted=!audioEnabled;decoder.play().catch(()=>{hint.textContent='Click Audio once to enable sound'});}};
-dc=pc.createDataChannel('input',{ordered:false,maxRetransmits:0});dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),3500);};
+dc=pc.createDataChannel('input',{ordered:true});dc.onopen=()=>{setState('Remote desktop connected','ok');hint.textContent='Click desktop for real keyboard + mouse control · Esc releases pointer lock';setTimeout(()=>hint.classList.add('hide'),3500);};
 pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});await pc.setLocalDescription(await pc.createOffer());for(let i=0;i<120&&pc.iceGatheringState!=='complete';i++)await new Promise(r=>setTimeout(r,50));
 const base=endpoint.replace(/^wss:\/\//,'https://').replace(/^ws:\/\//,'http://');const signalUrl=base.replace(/\/webrtc$/,'/webrtc');let response;try{response=await fetch(signalUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({password,sdp:pc.localDescription.sdp}),cache:'no-store',mode:'cors'});}catch(e){throw new Error('Signaling request failed: '+(e?.message||e)+'\nURL: '+signalUrl)}if(!response.ok)throw new Error(`Signaling HTTP ${response.status}: ${await response.text()}`);const answer=await response.json();if(!answer.sdp)throw new Error(answer.error||'Signaling returned no SDP answer');await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});const r=answer.ready||{};remoteW=r.width||1920;remoteH=r.height||1080;stats.textContent=`${remoteW}×${remoteH} · ${r.videoCodecs?.join('/')||'auto'}`;resize();renderCursor();}
 start().catch(showError);
