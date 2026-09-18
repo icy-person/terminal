@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm python python-pip python-virtualenv git curl ca-certificates sudo pkgconf ffmpeg xorg-server-xvfb xorg-xauth xorg-xhost xorg-xdpyinfo xorg-xwininfo xfce4 xfce4-terminal dbus pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils mesa mesa-utils vulkan-icd-loader vulkan-tools vulkan-swrast libx11 libxtst
+          pacman -S --needed --noconfirm python python-pip python-virtualenv git curl ca-certificates sudo pkgconf ffmpeg xorg-server-xvfb xorg-xauth xorg-xhost xorg-xdpyinfo xorg-xwininfo xfce4 xfce4-terminal dbus pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils mesa mesa-utils vulkan-icd-loader vulkan-tools vulkan-swrast libx11 libxtst xclip
           python -m venv /opt/webrtc-venv
           /opt/webrtc-venv/bin/pip install --upgrade pip wheel
           /opt/webrtc-venv/bin/pip install --only-binary=:all: -r runner/requirements-webrtc.txt
