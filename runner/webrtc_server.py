@@ -62,15 +62,30 @@ async def wait_ice_complete(pc):
 
 
 def make_video_player():
-    # Keep x11grab conservative: the previous low-latency FFmpeg flags could
-    # make the live X11 demuxer stop advancing after its first frame.
-    return MediaPlayer(DISPLAY, format="x11grab", options={
-        "video_size": f"{WIDTH}x{HEIGHT}",
-        "framerate": "30",
-        "draw_mouse": "0",
-        "thread_queue_size": "8",
-    }, decode=True)
-
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-f", "x11grab", "-video_size", f"{WIDTH}x{HEIGHT}",
+        "-framerate", str(FPS), "-draw_mouse", "0", "-i", DISPLAY,
+        "-an", "-c:v", "libx264", "-preset", "ultrafast",
+        "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "4.0",
+        "-pix_fmt", "yuv420p", "-r", str(FPS), "-fps_mode", "cfr",
+        "-g", str(FPS), "-keyint_min", str(FPS), "-sc_threshold", "0",
+        "-bf", "0", "-refs", "1", "-threads", "4",
+        "-b:v", str(VIDEO_BITRATE), "-minrate", str(VIDEO_BITRATE),
+        "-maxrate", str(VIDEO_BITRATE), "-bufsize", str(VIDEO_BITRATE),
+        "-x264-params", "repeat-headers=1:scenecut=0:force-cfr=1:rc-lookahead=0:sync-lookahead=0",
+        "-fflags", "+nobuffer", "-muxdelay", "0", "-muxpreload", "0",
+        "-flush_packets", "1", "-f", "mpegts", "pipe:1",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE,
+        stderr=open(os.getenv("WEBRTC_VIDEO_LOG", "/tmp/webrtc-video-ffmpeg.log"), "ab", buffering=0),
+        bufsize=0, env={**os.environ, "DISPLAY": DISPLAY},
+    )
+    player = MediaPlayer(proc.stdout, format="mpegts", decode=False)
+    player._throttle_playback = False
+    player._webrtc_ffmpeg = proc
+    return player
 
 def make_audio_player():
     pulse = os.getenv("PULSE_SERVER", "")
@@ -78,9 +93,7 @@ def make_audio_player():
     return MediaPlayer(source, format="pulse", options={
         "sample_rate": "48000",
         "channels": "2",
-        "fflags": "nobuffer",
-        "probesize": "32",
-        "analyzeduration": "0",
+        "thread_queue_size": "64",
     }, decode=True)
 
 
@@ -141,7 +154,7 @@ class InputBridge:
         kc = self._keycode(code, key)
         if kc:
             self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
-            self.display.sync()
+            self.display.flush()
 
     def text(self, text):
         if not self.display or not text:
@@ -195,7 +208,7 @@ class InputBridge:
             return
         px = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
         py = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
-        self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
+        self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
         self.display.sync()
 
     def button(self, button, down):
@@ -208,9 +221,8 @@ class InputBridge:
     def mouse_relative(self, dx, dy):
         if not self.display:
             return
-        q = self.display.screen().root.query_pointer()
-        px = max(0, min(self.width - 1, int(q.root_x + float(dx))))
-        py = max(0, min(self.height - 1, int(q.root_y + float(dy))))
+        self.mouse_x = max(0, min(self.width - 1, int(getattr(self, 'mouse_x', self.width // 2) + float(dx))))
+        self.mouse_y = max(0, min(self.height - 1, int(getattr(self, 'mouse_y', self.height // 2) + float(dy))))
         self.xtest.fake_input(self.display, self.X.MotionNotify, x=px, y=py)
         self.display.sync()
 
