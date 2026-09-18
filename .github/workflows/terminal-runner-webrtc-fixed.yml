@@ -14,6 +14,16 @@ on:
         required: true
         default: '6000000'
         type: string
+      width:
+        description: Capture width in pixels (also the Xvfb screen width)
+        required: true
+        default: '1920'
+        type: string
+      height:
+        description: Capture height in pixels (also the Xvfb screen height)
+        required: true
+        default: '1080'
+        type: string
       idle_seconds:
         description: Health-check interval
         required: true
@@ -61,9 +71,25 @@ jobs:
           echo "STREAM_UID=0" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           export DISPLAY=:99 XAUTHORITY=/tmp/webrtc.Xauthority
+          export WEBRTC_WIDTH="${{ inputs.width || '1920' }}" WEBRTC_HEIGHT="${{ inputs.height || '1080' }}"
+          echo "WEBRTC_WIDTH=$WEBRTC_WIDTH" >> "$GITHUB_ENV"
+          echo "WEBRTC_HEIGHT=$WEBRTC_HEIGHT" >> "$GITHUB_ENV"
+
+          # Disable xfwm4 compositing before the session starts: with llvmpipe
+          # it burns CPU and adds a frame of latency to the captured stream.
+          install -d "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
+          cat > "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfwm4" version="1.0">
+            <property name="general" type="empty">
+              <property name="use_compositing" type="bool" value="false"/>
+            </property>
+          </channel>
+          EOF
+
           touch "$XAUTHORITY"
           chmod 600 "$XAUTHORITY"
-          Xvfb "$DISPLAY" -screen 0 1920x1080x24 -ac +extension GLX +extension RANDR +extension MIT-SHM > "$RUNNER_TEMP/xvfb.log" 2>&1 &
+          Xvfb "$DISPLAY" -screen 0 "${WEBRTC_WIDTH}x${WEBRTC_HEIGHT}x24" -ac +extension GLX +extension RANDR +extension MIT-SHM > "$RUNNER_TEMP/xvfb.log" 2>&1 &
           for _ in $(seq 1 30); do
             xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
             sleep 1
@@ -120,7 +146,7 @@ jobs:
 
           report '## WebRTC preflight'
           report "Display: $DISPLAY"
-          report 'Resolution: 1920x1080'
+          report "Resolution: ${WEBRTC_WIDTH}x${WEBRTC_HEIGHT}"
 
           echo '=== X11 ===' | tee "$DIAG/x11.txt"
           xdpyinfo -display "$DISPLAY" >> "$DIAG/x11.txt" 2>&1 || fail 'Xvfb/X11 is not responding.'
@@ -139,13 +165,13 @@ jobs:
 
           echo '=== X11 screenshot ===' | tee "$DIAG/capture.txt"
           ffmpeg -hide_banner -loglevel error \
-            -f x11grab -video_size 1920x1080 -framerate 2 -draw_mouse 0 \
+            -f x11grab -video_size ${WEBRTC_WIDTH}x${WEBRTC_HEIGHT} -framerate 2 -draw_mouse 0 \
             -i "$DISPLAY" -frames:v 1 -y "$DIAG/x11-preflight.png" \
             >> "$DIAG/capture.txt" 2>&1 || fail 'FFmpeg could not capture a frame from X11.'
 
           echo '=== X11 capture stream ===' | tee -a "$DIAG/capture.txt"
           ffmpeg -hide_banner -loglevel error \
-            -f x11grab -video_size 1920x1080 -framerate 5 -draw_mouse 0 \
+            -f x11grab -video_size ${WEBRTC_WIDTH}x${WEBRTC_HEIGHT} -framerate 5 -draw_mouse 0 \
             -i "$DISPLAY" -t 3 -f null - \
             >> "$DIAG/capture.txt" 2>&1 || fail 'FFmpeg could not sustain the X11 capture stream.'
 
@@ -201,6 +227,8 @@ jobs:
           WEBRTC_PASSWORD: ${{ secrets.WEBRTC_PASSWORD }}
           WEBRTC_FPS: '30'
           WEBRTC_VIDEO_BITRATE: ${{ inputs.bitrate || '6000000' }}
+          WEBRTC_WIDTH: ${{ inputs.width || '1920' }}
+          WEBRTC_HEIGHT: ${{ inputs.height || '1080' }}
           WEBRTC_X264_THREADS: '4'
           WEBRTC_VIDEO_PROGRESS: ${{ runner.temp }}/webrtc-video-progress.log
           WEBRTC_VIDEO_LOG: ${{ runner.temp }}/webrtc-video-ffmpeg.log

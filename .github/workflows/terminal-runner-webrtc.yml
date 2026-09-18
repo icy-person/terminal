@@ -92,6 +92,20 @@ jobs:
           xhost +local: >/dev/null
 
           install -d -m 700 -o streamuser -g streamuser "/run/user/$STREAM_UID"
+
+          # Disable xfwm4 compositing: with llvmpipe it costs CPU and adds a
+          # frame of latency to the captured stream.
+          install -d -m 700 -o streamuser -g streamuser /home/streamuser/.config/xfce4/xfconf/xfce-perchannel-xml
+          cat > /home/streamuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfwm4" version="1.0">
+            <property name="general" type="empty">
+              <property name="use_compositing" type="bool" value="false"/>
+            </property>
+          </channel>
+          EOF
+          chown streamuser:streamuser /home/streamuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+
           runuser -u streamuser -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_RUNTIME_DIR="/run/user/$STREAM_UID" \
             bash -lc 'pipewire >/tmp/pipewire.log 2>&1 & pipewire-pulse >/tmp/pipewire-pulse.log 2>&1 & wireplumber >/tmp/wireplumber.log 2>&1 & sleep 2; dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 &'
 

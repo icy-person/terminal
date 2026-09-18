@@ -25,8 +25,8 @@ PASSWORD = os.environ.get("WEBRTC_PASSWORD", "")
 DISPLAY = os.getenv("DISPLAY", ":99")
 WIDTH = int(os.getenv("WEBRTC_WIDTH", "1920"))
 HEIGHT = int(os.getenv("WEBRTC_HEIGHT", "1080"))
-FPS = 30
-VIDEO_BITRATE = max(1_000_000, min(12_000_000, int(os.getenv("WEBRTC_VIDEO_BITRATE", "10000000"))))
+FPS = max(15, min(60, int(os.getenv("WEBRTC_FPS", "30"))))
+VIDEO_BITRATE = max(1_000_000, min(12_000_000, int(os.getenv("WEBRTC_VIDEO_BITRATE", "6000000"))))
 STUN_URL = os.getenv("WEBRTC_STUN_URL", "stun:stun.l.google.com:19302")
 TURN_URL = os.getenv("WEBRTC_TURN_URL", "")
 TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "")
@@ -35,8 +35,10 @@ TURN_PASSWORD = os.getenv("WEBRTC_TURN_PASSWORD", "")
 if not PASSWORD:
     raise SystemExit("WEBRTC_PASSWORD is required")
 
-# Lock the stream to 30 FPS and a predictable 6 Mbps budget for desktop content.
-VIDEO_BITRATE = 6_000_000
+# Keep the encoder VBV buffer small (~250 ms): a large buffer smooths the
+# bitrate at the cost of end-to-end latency, which is wrong for an
+# interactive remote desktop.
+VBV_BUFFER = max(200_000, int(os.getenv("WEBRTC_VBV_BUFFER", "1500000")))
 VIDEO_THREADS = max(2, min(4, int(os.getenv("WEBRTC_X264_THREADS", str(os.cpu_count() or 2)))))
 vpx.DEFAULT_BITRATE = VIDEO_BITRATE
 vpx.MIN_BITRATE = VIDEO_BITRATE
@@ -85,7 +87,7 @@ def make_video_player():
         "-g", str(FPS), "-keyint_min", str(FPS), "-sc_threshold", "0",
         "-bf", "0", "-refs", "1", "-threads", str(VIDEO_THREADS),
         "-b:v", str(VIDEO_BITRATE), "-minrate", str(VIDEO_BITRATE),
-        "-maxrate", str(VIDEO_BITRATE), "-bufsize", str(VIDEO_BITRATE),
+        "-maxrate", str(VIDEO_BITRATE), "-bufsize", str(VBV_BUFFER),
         "-x264-params", "repeat-headers=1:scenecut=0:force-cfr=1:rc-lookahead=0:sync-lookahead=0:sliced-threads=1:slices=4",
         "-fflags", "+nobuffer", "-muxdelay", "0", "-muxpreload", "0",
         "-flush_packets", "1", "-stats_period", "2", "-progress", os.getenv("WEBRTC_VIDEO_PROGRESS", "/tmp/webrtc-video-progress.log"), "-f", "mpegts", "pipe:1",
@@ -164,6 +166,10 @@ class InputBridge:
     """Inject browser keyboard/mouse events into the X11 desktop with XTest."""
     def __init__(self):
         self.display = self.xtest = self.X = None
+        # python-xlib is not thread-safe: input events run on the asyncio
+        # event loop thread while clipboard helpers run in worker threads,
+        # so every X access is serialized through this re-entrant lock.
+        self.lock = threading.RLock()
         try:
             from Xlib import X, XK, display as xdisplay
             from Xlib.ext import xtest
@@ -215,24 +221,28 @@ class InputBridge:
     def key(self, code, key, down):
         if not self.display:
             return
-        kc = self._keycode(code, key)
-        if kc:
-            self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
-            self.display.flush()
+        with self.lock:
+            kc = self._keycode(code, key)
+            if kc:
+                self.xtest.fake_input(self.display, self.X.KeyPress if down else self.X.KeyRelease, kc)
+                self.display.flush()
 
     def text(self, text):
         if not self.display or not text:
             return
         try:
+            # xclip runs outside the X lock so a slow clipboard write never
+            # blocks live mouse/keyboard events.
             subprocess.run(
                 ["xclip", "-selection", "clipboard", "-in"],
                 input=str(text), text=True, check=True, timeout=3,
                 env={**os.environ, "DISPLAY": DISPLAY},
             )
-            self.key("ControlLeft", "Control", True)
-            self.key("KeyV", "v", True)
-            self.key("KeyV", "v", False)
-            self.key("ControlLeft", "Control", False)
+            with self.lock:
+                self.key("ControlLeft", "Control", True)
+                self.key("KeyV", "v", True)
+                self.key("KeyV", "v", False)
+                self.key("ControlLeft", "Control", False)
         except Exception as exc:
             log.warning("unicode text injection failed: %s", exc)
 
@@ -248,10 +258,11 @@ class InputBridge:
                 timeout=3,
                 env={**os.environ, "DISPLAY": DISPLAY},
             )
-            self.key("ControlLeft", "Control", True)
-            self.key("KeyV", "v", True)
-            self.key("KeyV", "v", False)
-            self.key("ControlLeft", "Control", False)
+            with self.lock:
+                self.key("ControlLeft", "Control", True)
+                self.key("KeyV", "v", True)
+                self.key("KeyV", "v", False)
+                self.key("ControlLeft", "Control", False)
         except Exception as exc:
             log.warning("clipboard paste failed: %s", exc)
 
@@ -270,35 +281,39 @@ class InputBridge:
     def mouse(self, x, y):
         if not self.display:
             return
-        self.mouse_x = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
-        self.mouse_y = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
-        self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
-        self.display.flush()
+        with self.lock:
+            self.mouse_x = max(0, min(self.width - 1, round(float(x) * (self.width - 1))))
+            self.mouse_y = max(0, min(self.height - 1, round(float(y) * (self.height - 1))))
+            self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
+            self.display.flush()
 
     def button(self, button, down):
         if not self.display:
             return
-        if button:
-            self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
-            self.display.flush()
+        with self.lock:
+            if button:
+                self.xtest.fake_input(self.display, self.X.ButtonPress if down else self.X.ButtonRelease, int(button))
+                self.display.flush()
 
     def mouse_relative(self, dx, dy):
         if not self.display:
             return
-        self.mouse_x = max(0, min(self.width - 1, int(self.mouse_x + float(dx))))
-        self.mouse_y = max(0, min(self.height - 1, int(self.mouse_y + float(dy))))
-        self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
-        self.display.flush()
+        with self.lock:
+            self.mouse_x = max(0, min(self.width - 1, int(self.mouse_x + float(dx))))
+            self.mouse_y = max(0, min(self.height - 1, int(self.mouse_y + float(dy))))
+            self.xtest.fake_input(self.display, self.X.MotionNotify, x=self.mouse_x, y=self.mouse_y)
+            self.display.flush()
 
     def wheel(self, delta):
         if not self.display:
             return
-        button = 4 if float(delta) < 0 else 5
-        count = min(8, max(1, round(abs(float(delta)) / 40)))
-        for _ in range(count):
-            self.xtest.fake_input(self.display, self.X.ButtonPress, button)
-            self.xtest.fake_input(self.display, self.X.ButtonRelease, button)
-        self.display.flush()
+        with self.lock:
+            button = 4 if float(delta) < 0 else 5
+            count = min(8, max(1, round(abs(float(delta)) / 40)))
+            for _ in range(count):
+                self.xtest.fake_input(self.display, self.X.ButtonPress, button)
+                self.xtest.fake_input(self.display, self.X.ButtonRelease, button)
+            self.display.flush()
 
 
 async def health(_request):
@@ -351,6 +366,7 @@ async def handle_offer_post(request):
 
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers()))
         pcs.add(pc)
+        loop = asyncio.get_running_loop()
         input_bridge = InputBridge()
         video = make_video_player()
         selected_codecs = preferred_video_codecs()
@@ -380,6 +396,13 @@ async def handle_offer_post(request):
                     video.stop()
                 if audio:
                     audio.stop()
+                if input_bridge is not None and input_bridge.display is not None:
+                    with input_bridge.lock:
+                        try:
+                            input_bridge.display.close()
+                        except Exception:
+                            pass
+                        input_bridge.display = None
                 if pc.connectionState != "closed":
                     await pc.close()
             elif pc.connectionState == "disconnected":
@@ -406,6 +429,13 @@ async def handle_offer_post(request):
         @pc.on("datachannel")
         def on_datachannel(channel):
             log.info("input channel opened: %s", channel.label)
+
+            # xclip-backed helpers spawn subprocesses that can block for
+            # seconds. Running them inline would freeze RTP video, RTCP and
+            # all input processing, so they are offloaded to worker threads.
+            def offload(coro):
+                asyncio.run_coroutine_threadsafe(coro, loop)
+
             @channel.on("message")
             def on_message(message):
                 if not isinstance(message, str):
@@ -416,13 +446,15 @@ async def handle_offer_post(request):
                     if kind == "key":
                         input_bridge.key(str(event.get("code", "")), str(event.get("key", "")), bool(event.get("down")))
                     elif kind == "text":
-                        input_bridge.text(str(event.get("text", "")))
+                        offload(asyncio.to_thread(input_bridge.text, str(event.get("text", ""))))
                     elif kind == "paste":
-                        input_bridge.paste(str(event.get("text", "")))
+                        offload(asyncio.to_thread(input_bridge.paste, str(event.get("text", ""))))
                     elif kind == "clipboard-copy":
-                        text = input_bridge.clipboard()
-                        if text and channel.readyState == "open":
-                            channel.send(json.dumps({"type": "clipboard", "text": text}))
+                        async def return_clipboard():
+                            text = await asyncio.to_thread(input_bridge.clipboard)
+                            if text and channel.readyState == "open":
+                                channel.send(json.dumps({"type": "clipboard", "text": text}))
+                        offload(return_clipboard())
                     elif kind == "mouse":
                         input_bridge.mouse(float(event.get("x", 0.5)), float(event.get("y", 0.5)))
                     elif kind == "button":
@@ -466,6 +498,13 @@ async def handle_offer_post(request):
                 video.stop()
             if audio:
                 audio.stop()
+            if input_bridge is not None and input_bridge.display is not None:
+                with input_bridge.lock:
+                    try:
+                        input_bridge.display.close()
+                    except Exception:
+                        pass
+                    input_bridge.display = None
             await pc.close()
         return web.json_response({"error": "WebRTC signaling failed", "detail": str(exc)}, status=500, headers=cors_headers())
 
