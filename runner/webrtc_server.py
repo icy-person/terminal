@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import signal
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer, RTCSessionDescription, RTCRtpSender
@@ -60,12 +61,97 @@ async def wait_ice_complete(pc):
 
 
 def make_video_player():
-    return MediaPlayer(DISPLAY, format="x11grab", options={
-        "video_size": f"{WIDTH}x{HEIGHT}",
-        "framerate": "30",
-        "draw_mouse": "0",
-        "thread_queue_size": "8",
-    }, decode=True)
+    """
+    Capture + H.264 encode in a dedicated FFmpeg process.
+
+    The old path decoded X11 frames into Python/PyAV and then asked aiortc
+    to encode every frame again. That adds a full frame-copy/encode boundary
+    and, on a CPU-only runner, makes 1080p30 prone to stalls.
+
+    FFmpeg now produces timestamped H.264 directly. aiortc receives encoded
+    packets and only packetizes them into RTP; it does not re-encode them.
+    """
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-f", "x11grab",
+        "-video_size", f"{WIDTH}x{HEIGHT}",
+        "-framerate", str(FPS),
+        "-draw_mouse", "0",
+        "-i", DISPLAY,
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-profile:v", "baseline",
+        "-level:v", "3.1",
+        "-pix_fmt", "yuv420p",
+        "-r", str(FPS),
+        "-fps_mode", "cfr",
+        "-g", str(FPS),
+        "-keyint_min", str(FPS),
+        "-sc_threshold", "0",
+        "-bf", "0",
+        "-refs", "1",
+        "-b:v", str(VIDEO_BITRATE),
+        "-minrate", str(VIDEO_BITRATE),
+        "-maxrate", str(VIDEO_BITRATE),
+        "-bufsize", str(VIDEO_BITRATE),
+        "-x264-params",
+        "repeat-headers=1:scenecut=0:force-cfr=1:rc-lookahead=0:sync-lookahead=0",
+        "-fflags", "+nobuffer",
+        "-muxdelay", "0",
+        "-muxpreload", "0",
+        "-flush_packets", "1",
+        "-f", "mpegts",
+        "pipe:1",
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=0,
+        env={**os.environ, "DISPLAY": DISPLAY},
+    )
+    if proc.stdout is None:
+        proc.kill()
+        raise RuntimeError("failed to open FFmpeg video pipe")
+
+    player = MediaPlayer(proc.stdout, format="mpegts", decode=False)
+    # MPEG-TS is normally treated as a file by MediaPlayer, which would make
+    # it pace packets according to timestamps and add latency. This is a live
+    # pipe, so FFmpeg is the clock and we must not re-throttle it.
+    player._throttle_playback = False
+    player._webrtc_ffmpeg = proc
+    log.info(
+        "FFmpeg H264 capture started: %sx%s @ %sfps, CBR=%s, preset=ultrafast",
+        WIDTH, HEIGHT, FPS, VIDEO_BITRATE,
+    )
+    return player
+
+
+def stop_video_player(player):
+    if player is None:
+        return
+    try:
+        track = player.video
+        if track:
+            track.stop()
+    except Exception:
+        pass
+
+    proc = getattr(player, "_webrtc_ffmpeg", None)
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+        except Exception:
+            pass
 
 
 def make_audio_player():
@@ -80,7 +166,7 @@ def make_audio_player():
 
 
 class LatestVideoTrack(MediaStreamTrack):
-    """Keep exactly one newest live-video frame and drop stale frames."""
+    """Keep exactly one newest encoded/decoded video unit and drop stale ones."""
 
     kind = "video"
 
@@ -323,8 +409,11 @@ async def handle_offer_post(request):
         transceiver = pc.addTransceiver(latest_video, direction="sendonly")
         if selected_codecs:
             transceiver.setCodecPreferences(selected_codecs)
-        log.info("video capture started: %sx%s @ %s fps; latest-frame mode; codec preference=%s",
-                 WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs])
+        log.info(
+            "video pipeline ready: FFmpeg H264 packets -> latest-packet mode -> aiortc RTP; "
+            "%sx%s @ %s fps; codec preference=%s",
+            WIDTH, HEIGHT, FPS, [c.mimeType for c in selected_codecs],
+        )
 
         try:
             audio = make_audio_player()
@@ -343,8 +432,8 @@ async def handle_offer_post(request):
                 pcs.discard(pc)
                 if latest_video:
                     latest_video.stop()
-                elif video:
-                    video.stop()
+                if video:
+                    stop_video_player(video)
                 if audio:
                     audio.stop()
                 if pc.connectionState != "closed":
@@ -417,8 +506,8 @@ async def handle_offer_post(request):
             pcs.discard(pc)
             if latest_video:
                 latest_video.stop()
-            elif video:
-                video.stop()
+            if video:
+                stop_video_player(video)
             if audio:
                 audio.stop()
             await pc.close()
